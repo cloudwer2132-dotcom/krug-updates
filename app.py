@@ -2,7 +2,7 @@
 """Krug — окно на WebView2 (Edge), интерфейс в ui.html."""
 import os, re, base64, sys, json, time, threading, subprocess, shutil, webbrowser
 import datetime as dt
-import hashlib, urllib.request
+import hashlib, urllib.request, uuid
 import webview
 import core, brain
 
@@ -46,23 +46,116 @@ def res(name):
         if b and os.path.exists(os.path.join(b, name)): return os.path.join(b, name)
     return name
 
+AG = {"run": False}
+AG_STOP = threading.Event()
+SAVE_LISTS = ("tasks", "sched", "rem", "notes", "habits", "prompts", "sounds", "designs")
+
+def _js(code):
+    try: return win.evaluate_js(code)
+    except Exception: return None
+
+def _emit(ev): _js("Krug.agent(%s)" % json.dumps(ev, ensure_ascii=False))
+
+def _confirm(title, msg):
+    try: return bool(win.create_confirmation_dialog(title, msg))
+    except Exception: return False
+
+def _check_html(html):
+    """Страница запускается в скрытом iframe внутри окна Круга; ждём отчёт об ошибках JS."""
+    cid = uuid.uuid4().hex[:10]
+    _js("Krug.check(%s,%s)" % (json.dumps(cid), json.dumps(html)))
+    for _ in range(44):
+        time.sleep(0.25)
+        r = _js("Krug.chkGet(%s)" % json.dumps(cid))
+        if r:
+            try: return json.loads(r)
+            except Exception: break
+    return {"timeout": True}
+
+def _agent_job():
+    try: out = core.agent(_emit, AG_STOP, _confirm, _check_html)
+    except Exception as e: out = "⚠ Внутренняя ошибка агента: %s" % e
+    r = Api()._finish(out); AG["run"] = False
+    _emit({"t": "done", "state": D, "acts": r["acts"]})
+
 class Api:
     def state(self): return D
     def save(self, s):
-        D.update(s); core.save(); return True
-    def chat(self, text):
-        D["chat"].append({"role": "user", "content": text})
-        r = core.local(text)
-        if r is None:
-            p = D["cfg"]["provider"]
-            if p == core.BI: r = brain.fallback(text, vars(core))
-            else:
-                try: r = core.call(p, core.merge(D["chat"][-12:]), core.sysprompt())
-                except Exception as e: r = "⚠ Ошибка " + p + ": " + str(e)
+        for k, v in (s or {}).items():
+            if k == "cfg" and isinstance(v, dict): D["cfg"].update(v)
+            elif k in SAVE_LISTS and isinstance(v, list): D[k] = v
+        core.save(); return True
+    def _finish(self, r):
+        r = r or ""
         acts = re.findall(r"\[\[\s*(\w+)\s*:?\s*(.*?)\]\]", r, re.S)
         r = re.sub(r"\[\[.*?\]\]", "", r, flags=re.S).strip() or "Готово ✅"
         D["chat"].append({"role": "assistant", "content": r}); del D["chat"][:-80]; core.save()
         return {"state": D, "acts": [list(x) for x in acts]}
+    def chat(self, text):
+        """Встроенный мозг без ИИ (и совместимость со старым интерфейсом)."""
+        D["chat"].append({"role": "user", "content": text})
+        try:
+            r = core.local(text)
+            if r is None:
+                p = D["cfg"]["provider"]
+                if p == core.BI: r = brain.fallback(text, vars(core))
+                else:
+                    try: r = core.call(p, core.merge(D["chat"][-12:]), core.sysprompt())
+                    except Exception as e: r = "⚠ Ошибка " + p + ": " + str(e)
+        except Exception as e: r = "⚠ Внутренняя ошибка: %s" % e
+        return self._finish(r)
+    def chat2(self, text):
+        """Умный режим: быстрые команды — локально, остальное делает агент с инструментами."""
+        p = D["cfg"]["provider"]
+        if p == core.BI: return dict(self.chat(text), mode="chat")
+        if AG["run"]: return {"mode": "busy"}
+        D["chat"].append({"role": "user", "content": text})
+        try: r = core.local(text, llm=True)
+        except Exception: r = None
+        if r is not None: return dict(self._finish(r), mode="chat")
+        AG["run"] = True; AG_STOP.clear()
+        threading.Thread(target=_agent_job, daemon=True).start()
+        return {"mode": "agent"}
+    def agent_stop(self): AG_STOP.set(); return True
+    def connect_free(self, key):
+        key = (key or "").strip()
+        if len(key) < 20: return {"ok": False, "error": "ключ слишком короткий. Скопируй его целиком со страницы openrouter.ai/keys"}
+        c = D["cfg"]; c["keys"]["OpenRouter"] = key; c["provider"] = "OpenRouter"; c["models"]["OpenRouter"] = "auto"
+        try: c["free_models"] = core.fetch_free_models()
+        except Exception: c["free_models"] = core.FREE_FALLBACK
+        core.save()
+        try: core.call_smart("OpenRouter", [{"role": "user", "content": "Ответь одним словом: ок"}], "Тест", 200)
+        except Exception as e: return {"ok": False, "error": str(e)[:400], "cfg": c}
+        core.save(); return {"ok": True, "model": c.get("last_model", ""), "cfg": c}
+    def projects(self):
+        out = []
+        try: names = sorted(os.listdir(core.WS))
+        except OSError: return out
+        for n in names:
+            p = os.path.join(core.WS, n)
+            if not os.path.isdir(p): continue
+            fl = [os.path.join(r, x) for r, _, f in os.walk(p) for x in f]
+            mt = max([os.path.getmtime(x) for x in fl] or [os.path.getmtime(p)])
+            out.append({"name": n, "files": len(fl), "mt": mt, "when": dt.datetime.fromtimestamp(mt).strftime("%d.%m %H:%M")})
+        return sorted(out, key=lambda x: -x["mt"])
+    def open_project(self, name):
+        try:
+            p = core.wp(name); idx = os.path.join(p, "index.html")
+            if not os.path.exists(idx):
+                h = [f for f in sorted(os.listdir(p)) if f.endswith(".html")] if os.path.isdir(p) else []
+                idx = os.path.join(p, h[0]) if h else p
+            core.open_path(idx); return ""
+        except Exception as e: return "Не открылось: %s" % e
+    def zip_project(self, name):
+        try: r = core.t_zip_project({"name": name}, "", None); core.open_path(core.WS); return r
+        except Exception as e: return "Не вышло: %s" % e
+    def delete_project(self, name):
+        try:
+            p = core.wp(name)
+            if p != core.WS and os.path.isdir(p): shutil.rmtree(p)
+            return True
+        except Exception: return False
+    def workspace_folder(self): core.open_path(core.WS)
     def ask(self, user, system="Ты помощник."):
         p = D["cfg"]["provider"]
         if p == core.BI: return "Для этого нужен подключённый ИИ: Настройки → «Скачать локальный ИИ» или вставь ключ."
@@ -149,18 +242,24 @@ def ring(r):
 
 def loop():
     while True:
-        time.sleep(4); now = dt.datetime.now(); fired = []
-        for r in D["rem"]:
+        time.sleep(4)
+        try: _tick()
+        except Exception: pass
+
+def _tick():
+    if True:
+        now = dt.datetime.now(); fired = []
+        for r in list(D["rem"]):
             if not r.get("on"): continue
             try: w = dt.datetime.strptime(r["when"], "%Y-%m-%d %H:%M")
             except ValueError: continue
             if w > now: continue
             fired.append(dict(r))
-            if r["rep"] == "Один раз": r["on"] = False
+            if r.get("rep", "Один раз") == "Один раз": r["on"] = False
             else:
                 while w <= now:
-                    w += dt.timedelta(days=7 if r["rep"] == "Каждую неделю" else 1)
-                    while r["rep"] == "По будням" and w.weekday() > 4: w += dt.timedelta(days=1)
+                    w += dt.timedelta(days=7 if r.get("rep") == "Каждую неделю" else 1)
+                    while r.get("rep") == "По будням" and w.weekday() > 4: w += dt.timedelta(days=1)
                 r["when"] = w.strftime("%Y-%m-%d %H:%M")
         if fired:
             core.save()
