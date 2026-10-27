@@ -1,0 +1,11 @@
+{
+ "version": "4.1.0",
+ "notes": "Автообновление: кнопка «Обновить» сверху",
+ "min_launcher": 1,
+ "files": {
+  "app.py": "a8ae5aaac954cd1435ebcc1b69fe28e40ed2039b8bc8c977e234120f7b64ef62",
+  "core.py": "e329816be65b52c65af4ccdab65bb803931b3db63aefec7715b1711f68511ec6",
+  "brain.py": "d77e8e3311bc03d504c36b82d35bd58070448c4b17548fab96a5bdaeb1e270c0",
+  "ui.html": "db79c13ea3440adda1f695ad2917115c46dc8c527b83bf95cfa52ad7089d5b5a"
+ }
+}
