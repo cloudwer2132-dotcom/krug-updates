@@ -69,7 +69,8 @@ def parse_when(s, now):
         g = m[1].lower(); mins = 0
         for n, u in re.findall(r"(\d+)\s*(мин|ч|дн|де|нед)", g):
             mins += int(n) * {"мин": 1, "ч": 60, "дн": 1440, "де": 1440, "нед": 10080}[u]
-        if not mins: mins = 30 if "полчаса" in g else 90 if "полтора" in g else 2 if "пару" in g else 1 if "минуту" in g else 60
+        if not mins: mins = 30 if "полчаса" in g else 90 if "полтора" in g else 2 if "пару" in g else 1 if "минуту" in g else 1 if re.search(r"\d", g) else 60
+        mins = min(mins, 3650 * 1440)
         w = (now + dt.timedelta(minutes=mins)).replace(second=0, microsecond=0)
     else:
         day = None
@@ -87,16 +88,27 @@ def parse_when(s, now):
                         day = dt.date(now.year, MON[m[2].lower()], int(m[1]))
                         if day < now.date(): day = day.replace(year=now.year + 1)
                     except ValueError: day = None
+        if day is None:
+            m = take(r"\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b") or take(r"\b(2[4-9]|3[01])\.(\d{1,2})()\b")
+            if m:
+                try:
+                    y = int(m[3]) if m[3] else now.year
+                    if y < 100: y += 2000
+                    day = dt.date(y, int(m[2]), int(m[1]))
+                    if not m[3] and day < now.date(): day = day.replace(year=y + 1)
+                except ValueError: day = None
         hm = None
         m = take(r"\b(?:в|на|к|около)?\s*(\d{1,2})[:.](\d{2})\b")
-        if m: hm = (int(m[1]) % 24, int(m[2]) % 60)
+        if m:
+            if int(m[1]) > 23 or int(m[2]) > 59: return None, s.strip(), rep
+            hm = (int(m[1]), int(m[2]))
         else:
             m = take(r"\b(?:в|на|к)\s+(\d{1,2})(?:\s*(утра|вечера|дня|ночи|час\S*))?\b")
             if m:
                 h = int(m[1]); ap = (m[2] or "").lower()
                 if ap in ("вечера", "дня") and h < 12: h += 12
                 if ap == "ночи" and h == 12: h = 0
-                hm = (h % 24, 0)
+                hm = (h, 0) if h <= 23 else None
         if not hm:
             m = take(r"\b(утром|днём|днем|вечером|ночью)\b")
             if m: hm = {"утр": (9, 0), "днё": (13, 0), "дне": (13, 0), "веч": (19, 0), "ноч": (23, 0)}[m[1][:3].lower()]
@@ -192,7 +204,7 @@ def think(m, E):
         D["tasks"].append({"id": uid(), "text": txt, "prio": prio, "due": due, "done": False})
     pend = mem.pop("pending", None)
     if pend:
-        if pend["k"] == "rem":
+        if pend["k"] == "rem" and not R(r"напомни|будильн|разбуди|таймер|задач|заметк|привычк|покажи|план"):
             w, _, rep = parse_when(m, now)
             if w: E["add_rem"](pend["text"], w, pend["kind"], rep); return f"✅ Поставил: «{pend['text']}» на {w:%d.%m %H:%M}"
         elif pend["k"] == "tasks" and l in ("да", "добавь", "добавь в задачи", "давай", "ок", "хорошо", "добавить"):
@@ -314,10 +326,14 @@ def think(m, E):
     if R(r"динозавр|dino"):
         if R(r"убери|скрой|выключ|закрой|удали"): return "Убрал динозаврика. [[game: off]]"
         return "🦖 Динозаврик в левом нижнем углу. Прыгать: клик по полю или пробел. [[game: on]]"
-    if want and R(r"\bигр"):
+    gk = pick_game(l)
+    if gk and (want or R(r"поигра|запусти|открой|сыграем|\bигр")) and not E.get("LLM"):
+        path = E["make_game"](gk)
+        return f"🎮 Готово: «{GAMES[gk][0]}». Запустил в браузере. Файл: {path}\n(Хочешь свою особенную игру — подключи ИИ: Настройки → бесплатный OpenRouter.)"
+    if want and R(r"\bигр") and not E.get("LLM"):
         return f"🎮 Собираю игру в студии дизайна: «{m}». Без подключённого ИИ я умею только динозаврика-раннера, со своим ИИ придумаю любую. [[design: game|{m}]]"
     self_ui = R(r"приложени|интерфейс|себе|твой|твоё|твое|свой|оформлен|внешн|облик|тему|тема|стиль|цвет")
-    if want and (R(r"сайт|лендинг|визитк|постер|логотип|анимаци|страниц") or (R(r"дизайн") and R(r"\bдля\b") and not self_ui)):
+    if want and not E.get("LLM") and (R(r"сайт|лендинг|визитк|постер|логотип|анимаци|страниц") or (R(r"дизайн") and R(r"\bдля\b") and not self_ui)):
         k = "card" if R(r"визитк|постер") else "logo" if R(r"логотип") else "anim" if R(r"анимаци") else "landing"
         return f"🎨 Создаю в студии дизайна: «{m}». [[design: {k}|{m}]]"
     ui_ctx = R(r"дизайн|тем[ауыо]|стил[ьяе]|оформлен|внешн|интерфейс|облик|приложени")
@@ -343,6 +359,9 @@ def think(m, E):
         if D.get("cfg", {}).get("provider", "").startswith("Krug Brain"):
             return "🎨 Свободную перерисовку интерфейса делает подключённый ИИ (Настройки). Без него могу применить стили: киберпанк, уют, минимализм, неон, океан, закат, лес, сакура, золото, матрица, космос, ретро; сменить акцентный цвет («акцент красный»), скруглить углы, включить звёзды или сетку на фоне."
         return f"🎨 Перерисовываю интерфейс… [[restyle: {m}]]"
+    if l in ("расписание", "покажи расписание", "моё расписание", "мое расписание", "что в расписании"):
+        rows = sorted(D["sched"], key=lambda x: (DAYS.index(x["day"]) if x["day"] in DAYS else 9, x["time"]))
+        return ("📆 Расписание:\n" + "\n".join(f"  {x['day']} {x['time']} — {x['text']}" for x in rows)) if rows else "Расписание пусто. Скажи: «добавь в расписание пн,ср 18:00 английский»."
     # напоминания, будильники, таймеры
     if R(r"напомни|будильн|разбуди|таймер"):
         kind = "Будильник" if R(r"будильн|разбуди") else "Напоминание"
@@ -378,6 +397,7 @@ def think(m, E):
         done = len([t for t in D["tasks"] if t["done"]]); op = len(D["tasks"]) - done; td = now.date().isoformat()
         hb = len([h for h in D["habits"] if td in h["log"]])
         return f"📊 Выполнено задач: {done}, осталось: {op}. Привычек сегодня: {hb}/{len(D['habits'])}." + (" Отличный прогресс!" if done > op else " Выбери одну главную задачу и начни с неё.")
+    if E.get("LLM"): return None
     for k, v in TPL.items():
         if k in l and R(r"план|состав|режим|распорядок"): return v
     r = re.match(r"^(?:составь|сделай|построй|создай|дай)\s+(?:мне\s+)?план\s+(?:изучения|освоения|подготовки к|подготовки|для|по|на)?\s*(.+)$", m, re.I)
@@ -410,3 +430,155 @@ def fallback(m, E):
     out.append("Свободные вопросы встроенный движок не понимает. Сохранить это как «задачу» или «заметку»? Напиши одно слово.\n"
                "Для умных ответов: «Настройки» → «Скачать локальный ИИ» (бесплатно, без ключей) или вставь ключ OpenAI / Claude / Gemini. Команды — «помощь».")
     return "\n\n".join(out)
+
+
+# ---------- готовые игры (работают без ИИ и без интернета) ----------
+_PAGE = r'''<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>@@TITLE@@</title>
+<style>*{box-sizing:border-box;margin:0}body{min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 30% 20%,#1b1f4a,#0a0b1a 70%);color:#eef;font:16px system-ui,sans-serif;user-select:none}.w{text-align:center;padding:10px}h1{font-size:20px;margin-bottom:8px;letter-spacing:1px}canvas{display:block;margin:0 auto;background:#0d1030;border:2px solid #3b4290;border-radius:14px;box-shadow:0 0 40px #5b6cff55;max-width:96vw;max-height:78vh;touch-action:none}p{color:#9aa3d8;font-size:13px;margin-top:10px}</style>
+<div class="w"><h1>@@TITLE@@</h1><canvas id="c" width="@@W@@" height="@@H@@"></canvas><p>@@HINT@@</p></div><script>
+const c=document.getElementById('c'),x=c.getContext('2d'),W=c.width,H=c.height;
+const LS={g:k=>{try{return +localStorage.getItem(k)||0}catch(e){return 0}},s:(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}}};
+const rr=(a,b,w,h,r)=>{x.beginPath();x.roundRect?x.roundRect(a,b,w,h,r):x.rect(a,b,w,h)};
+const pos=e=>{const r=c.getBoundingClientRect();return{x:(e.clientX-r.left)*W/r.width,y:(e.clientY-r.top)*H/r.height}};
+const ov=(t,s)=>{x.fillStyle='#000b';x.fillRect(0,0,W,H);x.fillStyle='#fff';x.textAlign='center';x.font='bold 30px system-ui';x.fillText(t,W/2,H/2-8);x.font='16px system-ui';x.fillStyle='#b9c0ff';x.fillText(s,W/2,H/2+24);x.textAlign='left'};
+const bg=()=>{x.fillStyle='#0d1030';x.fillRect(0,0,W,H)};
+@@JS@@
+</script></html>'''
+
+_SNAKE = r'''
+const N=24,S=W/N;let sn,dir={x:1,y:0},nd=dir,food,score=0,best=LS.g('snk'),over=true,last=0,delay=110;
+const put=()=>{do{food={x:Math.random()*N|0,y:Math.random()*N|0}}while(sn.some(s=>s.x==food.x&&s.y==food.y))};
+function reset(){sn=[{x:10,y:12},{x:9,y:12},{x:8,y:12}];dir=nd={x:1,y:0};score=0;over=false;delay=110;put()}
+function step(){dir=nd;const h={x:sn[0].x+dir.x,y:sn[0].y+dir.y};
+ if(h.x<0||h.y<0||h.x>=N||h.y>=N||sn.some(s=>s.x==h.x&&s.y==h.y)){over=true;if(score>best){best=score;LS.s('snk',best)}return}
+ sn.unshift(h);if(h.x==food.x&&h.y==food.y){score++;delay=Math.max(55,delay-3);put()}else sn.pop()}
+function draw(){bg();x.strokeStyle='#ffffff08';for(let i=0;i<=N;i++){x.beginPath();x.moveTo(i*S,0);x.lineTo(i*S,H);x.moveTo(0,i*S);x.lineTo(W,i*S);x.stroke()}
+ x.fillStyle='#ff5d73';x.shadowColor='#ff5d73';x.shadowBlur=14;x.beginPath();x.arc(food.x*S+S/2,food.y*S+S/2,S/2-3,0,7);x.fill();x.shadowBlur=0;
+ sn.forEach((s,i)=>{x.fillStyle='hsl('+(150+i*4)+',80%,'+Math.max(30,60-i*.6)+'%)';rr(s.x*S+1,s.y*S+1,S-2,S-2,6);x.fill()});
+ x.fillStyle='#fff';x.font='bold 16px system-ui';x.fillText('Счёт '+score+'   Рекорд '+best,10,22);
+ if(over)ov(score?'Игра окончена':'ЗМЕЙКА','Пробел или касание — начать')}
+function loop(t){if(!over&&t-last>delay){last=t;step()}draw();requestAnimationFrame(loop)}
+const KM={ArrowUp:[0,-1],KeyW:[0,-1],ArrowDown:[0,1],KeyS:[0,1],ArrowLeft:[-1,0],KeyA:[-1,0],ArrowRight:[1,0],KeyD:[1,0]};
+addEventListener('keydown',e=>{const k=KM[e.code];if(k){if(k[0]!=-dir.x||k[1]!=-dir.y)nd={x:k[0],y:k[1]};e.preventDefault()}if(e.code=='Space'){e.preventDefault();if(over)reset()}});
+let tx=null,ty=0;c.addEventListener('pointerdown',e=>{if(over){reset();return}tx=e.clientX;ty=e.clientY});
+c.addEventListener('pointerup',e=>{if(tx==null)return;const dx=e.clientX-tx,dy=e.clientY-ty;tx=null;if(Math.max(Math.abs(dx),Math.abs(dy))<20)return;const k=Math.abs(dx)>Math.abs(dy)?[Math.sign(dx),0]:[0,Math.sign(dy)];if(k[0]!=-dir.x||k[1]!=-dir.y)nd={x:k[0],y:k[1]}});
+reset();over=true;requestAnimationFrame(loop);
+'''
+
+_PONG = r'''
+const PH=80;let py=H/2-PH/2,ay=py,ball={x:W/2,y:H/2,vx:5,vy:2},sc=[0,0],state=0,keys={},trail=[],msg='';
+const serve=d=>{ball={x:W/2,y:H/2,vx:5*d,vy:Math.random()*5-2.5};trail=[]};
+function start(){sc=[0,0];serve(1);state=1;msg=''}
+function upd(){
+ if(keys.ArrowUp||keys.KeyW)py-=7;if(keys.ArrowDown||keys.KeyS)py+=7;py=Math.max(0,Math.min(H-PH,py));
+ ay+=Math.max(-4.4,Math.min(4.4,ball.y-PH/2-ay));ay=Math.max(0,Math.min(H-PH,ay));
+ ball.x+=ball.vx;ball.y+=ball.vy;
+ if(ball.y<6||ball.y>H-6){ball.vy*=-1;ball.y=Math.max(6,Math.min(H-6,ball.y))}
+ trail.push([ball.x,ball.y]);if(trail.length>14)trail.shift();
+ if(ball.vx<0&&ball.x-6<=30&&ball.x>14&&ball.y>py-6&&ball.y<py+PH+6){ball.vx=Math.min(13,-ball.vx*1.07);ball.vy=(ball.y-(py+PH/2))/(PH/2)*6}
+ if(ball.vx>0&&ball.x+6>=W-30&&ball.x<W-14&&ball.y>ay-6&&ball.y<ay+PH+6){ball.vx=-Math.min(13,ball.vx*1.07);ball.vy=(ball.y-(ay+PH/2))/(PH/2)*6}
+ if(ball.x<-10){sc[1]++;serve(1)}if(ball.x>W+10){sc[0]++;serve(-1)}
+ if(sc[0]>=7||sc[1]>=7){state=2;msg=sc[0]>=7?'Ты победил! 🎉':'Победил компьютер'}}
+function draw(){bg();x.strokeStyle='#ffffff25';x.setLineDash([8,10]);x.beginPath();x.moveTo(W/2,0);x.lineTo(W/2,H);x.stroke();x.setLineDash([]);
+ x.fillStyle='#6ea8ff';rr(20,py,10,PH,5);x.fill();x.fillStyle='#ff8fb8';rr(W-30,ay,10,PH,5);x.fill();
+ trail.forEach((t,i)=>{x.fillStyle='rgba(255,255,255,'+(i/trail.length*.35)+')';x.beginPath();x.arc(t[0],t[1],6*i/trail.length+1,0,7);x.fill()});
+ x.fillStyle='#fff';x.beginPath();x.arc(ball.x,ball.y,6,0,7);x.fill();
+ x.font='bold 44px system-ui';x.textAlign='center';x.fillStyle='#ffffff55';x.fillText(sc[0],W/2-60,56);x.fillText(sc[1],W/2+60,56);x.textAlign='left';
+ if(state==0)ov('ПИНГ-ПОНГ','Пробел или клик — старт. Игра до 7');if(state==2)ov(msg,'Пробел или клик — ещё раз')}
+function loop(){if(state==1)upd();draw();requestAnimationFrame(loop)}
+addEventListener('keydown',e=>{keys[e.code]=1;if(e.code=='Space'){e.preventDefault();if(state!=1)start()}if(e.code.startsWith('Arrow'))e.preventDefault()});
+addEventListener('keyup',e=>keys[e.code]=0);
+c.addEventListener('pointermove',e=>{if(state==1)py=Math.max(0,Math.min(H-PH,pos(e).y-PH/2))});
+c.addEventListener('pointerdown',e=>{if(state!=1)start()});
+loop();
+'''
+
+_BREAKOUT = r'''
+const PW=90;let px=W/2-PW/2,ball={x:W/2,y:H-44,vx:0,vy:0,stuck:true},bricks=[],score=0,lives=3,state=0,keys={},best=LS.g('brk'),lvl=1;
+function build(){bricks=[];for(let r=0;r<6;r++)for(let i=0;i<10;i++)bricks.push({x:i*48+4,y:50+r*24,w:40,h:18,c:'hsl('+(r*50+200)+',80%,60%)',a:true})}
+function park(){ball={x:px+PW/2,y:H-44,vx:0,vy:0,stuck:true}}
+function newGame(){score=0;lives=3;lvl=1;build();px=W/2-PW/2;park();state=1}
+function launch(){if(ball.stuck){ball.stuck=false;ball.vx=(Math.random()*2-1)*3;ball.vy=-(5+lvl*.4)}}
+function upd(){
+ if(keys.ArrowLeft||keys.KeyA)px-=8;if(keys.ArrowRight||keys.KeyD)px+=8;px=Math.max(0,Math.min(W-PW,px));
+ if(ball.stuck){ball.x=px+PW/2;return}
+ ball.x+=ball.vx;ball.y+=ball.vy;
+ if(ball.x<6||ball.x>W-6){ball.vx*=-1;ball.x=Math.max(6,Math.min(W-6,ball.x))}if(ball.y<6){ball.vy=Math.abs(ball.vy)}
+ if(ball.vy>0&&ball.y+6>=H-30&&ball.y<H-14&&ball.x>px-4&&ball.x<px+PW+4){ball.vy=-Math.abs(ball.vy);ball.vx=(ball.x-(px+PW/2))/(PW/2)*6}
+ for(const b of bricks){if(b.a&&ball.x+6>b.x&&ball.x-6<b.x+b.w&&ball.y+6>b.y&&ball.y-6<b.y+b.h){b.a=false;score+=10;ball.vy*=-1;break}}
+ if(!bricks.some(b=>b.a)){lvl++;build();park()}
+ if(ball.y>H+10){lives--;if(lives<=0){state=2;if(score>best){best=score;LS.s('brk',best)}}else park()}}
+function draw(){bg();bricks.forEach(b=>{if(b.a){x.fillStyle=b.c;rr(b.x,b.y,b.w,b.h,4);x.fill()}});
+ x.fillStyle='#6ea8ff';rr(px,H-30,PW,12,6);x.fill();x.fillStyle='#fff';x.beginPath();x.arc(ball.x,ball.y,6,0,7);x.fill();
+ x.font='bold 15px system-ui';x.fillText('Счёт '+score+'  Рекорд '+best+'  Жизни '+'♥'.repeat(Math.max(0,lives))+'  Уровень '+lvl,10,24);
+ if(state==0)ov('АРКАНОИД','Пробел или клик — старт');if(state==2)ov('Игра окончена','Счёт '+score+'. Пробел — заново');if(state==1&&ball.stuck){x.fillStyle='#b9c0ff';x.font='14px system-ui';x.textAlign='center';x.fillText('Пробел или клик — запуск мяча',W/2,H-70);x.textAlign='left'}}
+function loop(){if(state==1)upd();draw();requestAnimationFrame(loop)}
+addEventListener('keydown',e=>{keys[e.code]=1;if(e.code=='Space'){e.preventDefault();if(state!=1)newGame();else launch()}if(e.code.startsWith('Arrow'))e.preventDefault()});
+addEventListener('keyup',e=>keys[e.code]=0);
+c.addEventListener('pointermove',e=>{if(state==1)px=Math.max(0,Math.min(W-PW,pos(e).x-PW/2))});
+c.addEventListener('pointerdown',e=>{if(state!=1)newGame();else launch()});
+build();loop();
+'''
+
+_FLAPPY = r'''
+let by=H/2,vy=0,pipes=[],score=0,best=LS.g('flp'),state=0,fr=0,cl=[{x:60,y:90},{x:260,y:140},{x:380,y:60}];
+function reset(){by=H/2;vy=0;pipes=[];score=0;fr=0}
+function flap(){if(state==2){reset();state=0;return}state=1;vy=-7.2}
+function upd(){vy+=.42;by+=vy;fr++;if(fr%88==1)pipes.push({x:W,y:80+Math.random()*(H-330),g:140,s:false});
+ pipes.forEach(p=>p.x-=2.6);pipes=pipes.filter(p=>p.x>-70);
+ for(const p of pipes){if(!p.s&&p.x+52<80){p.s=true;score++}if(92>p.x&&68<p.x+52&&(by-12<p.y||by+12>p.y+p.g))state=2}
+ if(by>H-40||by<-30)state=2;if(state==2&&score>best){best=score;LS.s('flp',best)}}
+function draw(){const g=x.createLinearGradient(0,0,0,H);g.addColorStop(0,'#5ec8ff');g.addColorStop(1,'#bdeeff');x.fillStyle=g;x.fillRect(0,0,W,H);
+ x.fillStyle='#ffffffaa';cl.forEach(k=>{if(state==1)k.x-=.4;if(k.x<-60)k.x=W+60;x.beginPath();x.arc(k.x,k.y,22,0,7);x.arc(k.x+24,k.y+6,18,0,7);x.arc(k.x-22,k.y+8,16,0,7);x.fill()});
+ pipes.forEach(p=>{x.fillStyle='#3cc35a';x.fillRect(p.x,0,52,p.y);x.fillRect(p.x,p.y+p.g,52,H);x.fillStyle='#2a9a44';x.fillRect(p.x-4,p.y-22,60,22);x.fillRect(p.x-4,p.y+p.g,60,22)});
+ x.fillStyle='#d9b36b';x.fillRect(0,H-40,W,40);x.fillStyle='#8bd450';x.fillRect(0,H-40,W,8);
+ x.save();x.translate(80,by);x.rotate(Math.max(-.5,Math.min(1,vy/12)));x.fillStyle='#ffd23f';x.beginPath();x.arc(0,0,13,0,7);x.fill();x.fillStyle='#fff';x.beginPath();x.arc(5,-4,5,0,7);x.fill();x.fillStyle='#222';x.beginPath();x.arc(7,-4,2,0,7);x.fill();x.fillStyle='#ff7a3c';x.beginPath();x.moveTo(11,0);x.lineTo(21,3);x.lineTo(11,7);x.fill();x.restore();
+ x.fillStyle='#fff';x.strokeStyle='#0006';x.lineWidth=4;x.font='bold 40px system-ui';x.textAlign='center';x.strokeText(score,W/2,60);x.fillText(score,W/2,60);x.textAlign='left';x.lineWidth=1;
+ if(state==0)ov('FLAPPY','Пробел, клик или касание — взмах');if(state==2)ov('Конец игры','Счёт '+score+'  Рекорд '+best+'. Пробел — ещё раз')}
+function loop(){if(state==1)upd();else if(state==0)by=H/2+Math.sin(Date.now()/250)*8;draw();requestAnimationFrame(loop)}
+addEventListener('keydown',e=>{if(e.code=='Space'||e.code=='ArrowUp'){e.preventDefault();flap()}});
+c.addEventListener('pointerdown',flap);loop();
+'''
+
+_G2048 = r'''<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>2048</title>
+<style>*{box-sizing:border-box;margin:0}body{min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 30% 20%,#1b1f4a,#0a0b1a 70%);color:#eef;font:16px system-ui,sans-serif;user-select:none}.w{width:min(92vw,420px)}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}h1{font-size:44px}.sc{background:#1b1f4a;border-radius:10px;padding:6px 14px;text-align:center;font-size:12px;color:#9aa3d8}.sc b{display:block;font-size:20px;color:#fff}
+#g{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;background:#12153a;padding:10px;border-radius:14px;touch-action:none;position:relative}.t{aspect-ratio:1;border-radius:10px;display:grid;place-items:center;font-weight:800;font-size:clamp(20px,6vw,32px);background:#1e2250;color:#fff;transition:background .15s}
+button{margin-top:14px;background:linear-gradient(120deg,#6ea8ff,#b78cff);border:0;color:#fff;border-radius:12px;padding:10px 20px;font:inherit;font-weight:700;cursor:pointer}#o{position:absolute;inset:0;background:#000b;border-radius:14px;display:none;place-items:center;font-size:28px;font-weight:800}p{color:#9aa3d8;font-size:13px;margin-top:10px}</style>
+<div class="w"><div class="top"><h1>2048</h1><div style="display:flex;gap:8px"><div class="sc">СЧЁТ<b id="s">0</b></div><div class="sc">РЕКОРД<b id="b">0</b></div></div></div><div id="g"><div id="o">Игра окончена</div></div><button onclick="reset()">Новая игра</button><p>Стрелки или WASD, на телефоне — свайп</p></div><script>
+const LS={g:k=>{try{return +localStorage.getItem(k)||0}catch(e){return 0}},s:(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}}};
+const COL={0:'#1e2250',2:'#3b4cca',4:'#4c6ef5',8:'#7950f2',16:'#be4bdb',32:'#f06595',64:'#ff6b6b',128:'#fd7e14',256:'#fab005',512:'#82c91e',1024:'#12b886',2048:'#15aabf'};
+let g,score=0,best=LS.g('2048'),over=false;const G=document.getElementById('g');
+function add(){const e=[];g.forEach((r,i)=>r.forEach((v,j)=>{if(!v)e.push([i,j])}));if(!e.length)return;const p=e[Math.random()*e.length|0];g[p[0]][p[1]]=Math.random()<.9?2:4}
+function reset(){g=[[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0]];score=0;over=false;add();add();draw()}
+function slide(row){const a=row.filter(v=>v);let s=0;for(let i=0;i<a.length-1;i++)if(a[i]==a[i+1]){a[i]*=2;s+=a[i];a.splice(i+1,1)}while(a.length<4)a.push(0);return[a,s]}
+function can(){for(let i=0;i<4;i++)for(let j=0;j<4;j++){if(!g[i][j])return true;if(j<3&&g[i][j]==g[i][j+1])return true;if(i<3&&g[i][j]==g[i+1][j])return true}return false}
+function move(d){if(over)return;let gain=0;const n=g.map(r=>r.slice());
+ for(let k=0;k<4;k++){let line=[0,1,2,3].map(i=>d%2==0?g[k][i]:g[i][k]);if(d>=2)line.reverse();const res=slide(line);gain+=res[1];const r=res[0];if(d>=2)r.reverse();r.forEach((v,i)=>{if(d%2==0)n[k][i]=v;else n[i][k]=v})}
+ if(!n.some((r,i)=>r.some((v,j)=>v!=g[i][j])))return;g=n;score+=gain;add();if(score>best){best=score;LS.s('2048',best)}over=!can();draw()}
+function draw(){G.querySelectorAll('.t').forEach(e=>e.remove());const o=document.getElementById('o');g.forEach(r=>r.forEach(v=>{const t=document.createElement('div');t.className='t';t.style.background=COL[v]||'#15aabf';t.textContent=v||'';G.insertBefore(t,o)}));
+ document.getElementById('s').textContent=score;document.getElementById('b').textContent=best;o.style.display=over?'grid':'none'}
+const KM={ArrowLeft:0,KeyA:0,ArrowUp:1,KeyW:1,ArrowRight:2,KeyD:2,ArrowDown:3,KeyS:3};
+addEventListener('keydown',e=>{if(e.code in KM){e.preventDefault();move(KM[e.code])}});
+let sx=null,sy=0;G.addEventListener('pointerdown',e=>{sx=e.clientX;sy=e.clientY});
+G.addEventListener('pointerup',e=>{if(sx==null)return;const dx=e.clientX-sx,dy=e.clientY-sy;sx=null;if(Math.max(Math.abs(dx),Math.abs(dy))<24)return;move(Math.abs(dx)>Math.abs(dy)?(dx<0?0:2):(dy<0?1:3))});
+reset();
+</script></html>'''
+
+GAMES = {
+    "snake": ("Змейка", _SNAKE, 480, 480, "Стрелки или WASD, на телефоне — свайп"),
+    "pong": ("Пинг-понг", _PONG, 640, 400, "Стрелки / W S или мышь. До 7 очков"),
+    "breakout": ("Арканоид", _BREAKOUT, 480, 560, "Стрелки или мышь, пробел — запуск мяча"),
+    "flappy": ("Flappy", _FLAPPY, 360, 540, "Пробел, клик или касание"),
+    "2048": ("2048", None, 0, 0, ""),
+}
+GK = {"snake": r"змейк|snake", "pong": r"понг|pong|теннис", "breakout": r"арканоид|breakout|кирпич", "flappy": r"flappy|флапп|птиц|птичк", "2048": r"2048"}
+
+def game_html(kind):
+    t, js, w, h, hint = GAMES[kind]
+    if kind == "2048": return _G2048
+    return _PAGE.replace("@@TITLE@@", t).replace("@@W@@", str(w)).replace("@@H@@", str(h)).replace("@@HINT@@", hint).replace("@@JS@@", js)
+
+def pick_game(l):
+    for k, p in GK.items():
+        if re.search(p, l): return k
+    return None
