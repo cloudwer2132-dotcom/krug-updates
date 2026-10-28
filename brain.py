@@ -17,7 +17,9 @@ HELP = """Я Krug Brain — встроенный офлайн-помощник. 
 ✨ «напиши промпт для логотипа кофейни» · 🧮 «посчитай 15% от 2400» · «сколько дней до 1 января» · «выбери чай или кофе»
 🎵 «создай приятный звук для будильника» · «поставь звук колокольчик на будильник» · «какой звук на будильнике»
 🎨 «сделай дизайн киберпанк» · «акцент красный» · «круглее» · «звёзды на фоне» · «перерисуй интерфейс сам» (со своим ИИ)
-🦖 «создай игру динозаврик» · «сделай лендинг для кофейни» · «логотип для Круг»
+🎮 «создай игру змейка / пинг-понг / арканоид / flappy / 2048 / тетрис» · 🦖 «создай игру динозаврик» · «сделай лендинг для кофейни»
+📂 «открой калькулятор / блокнот / chrome» (всегда спрашиваю разрешение) · 🎧 «включи музыку спокойный lo-fi» · «что за песня: <строчка>»
+🎓 «когда я пишу утро — план» · «научи: …» · «забудь про …» · «что ты знаешь обо мне»
 🧠 «запомни: пароль от вайфая = 12345» · «что такое помодоро» · «мотивация» · «меня зовут Алекс»"""
 
 EX = ["напомни через 10 минут выпить воды", "будильник на 7:00", "задача: купить хлеб", "покажи задачи", "составь план изучения английского на 8 недель",
@@ -214,9 +216,17 @@ def think(m, E):
             if l.startswith("задач"): task(pend["text"])
             else: D["notes"].append({"id": uid(), "title": pend["text"][:40], "body": pend["text"]})
             save(); refresh(); return "✅ Сохранил"
+    r = re.match(r"^(?:когда я (?:пишу|говорю)|если я (?:пишу|говорю))\s*[:«\"]?\s*(.+?)[»\"]?\s*(?:=|—|->|→|,|то|значит|это)\s*(.+)$", m, re.I)
+    if r: return E["learn_rule"](r[1], r[2])
+    r = re.match(r"^научи(?:сь)?[:,]?\s*(.+)$", m, re.I)
+    if r and mem.get("last_unknown"): return E["learn_rule"](mem.pop("last_unknown"), r[1])
+    rl = E["match_rule"](m)
+    if rl is not None: return rl
+    r = re.match(r"^забудь\s+(?:что\s+)?(.+)$", m, re.I)
+    if r and not R(r"про это|всё|все"): return E["mem_forget"](r[1])
     if l in ("помощь", "/help", "help", "что ты умеешь", "что умеешь", "команды"): return HELP
     r = re.match(r"меня зовут\s+(\w+)", m, re.I)
-    if r: mem["name"] = r[1].capitalize(); save(); return f"Приятно познакомиться, {mem['name']}! 🙂"
+    if r: mem["name"] = r[1].capitalize(); save(); E["mem_add"]("Пользователя зовут " + mem["name"], "Обо мне"); return f"Приятно познакомиться, {mem['name']}! 🙂"
     if l in ("как меня зовут", "кто я"): return f"Тебя зовут {mem['name']}." if mem["name"] else "Ты не говорил. Напиши «меня зовут …»."
     nm = (", " + mem["name"]) if mem["name"] else ""
     if re.match(r"^(привет|здравствуй|добрый (день|вечер)|доброе утро|хай|салют)", l):
@@ -229,11 +239,11 @@ def think(m, E):
         return ("Я Krug Brain — встроенный офлайн-помощник Круга. Это не большая нейросеть: я точно выполняю команды, понимаю даты, планирую и помню твои факты. "
                 "Для свободных умных ответов подключи ИИ в «Настройках».")
     r = re.match(r"запомни:?\s*(.+?)\s*(?:=|—| - | это )\s*(.+)$", m, re.I)
-    if r: mem["facts"][r[1].strip().lower()] = r[2].strip(); save(); return f"🧠 Запомнил: {r[1]} → {r[2]}"
+    if r: mem["facts"][r[1].strip().lower()] = r[2].strip(); E["mem_add"](f"{r[1].strip()}: {r[2].strip()}", "Факты"); save(); return f"🧠 Запомнил: {r[1]} → {r[2]}"
     r = re.match(r"запомни:?\s*(.+)$", m, re.I)
-    if r: D["notes"].append({"id": uid(), "title": r[1][:40], "body": r[1]}); save(); refresh(); return "🧠 Сохранил в заметки"
-    if l in ("что ты помнишь", "что я просил запомнить", "мои факты"):
-        return "🧠 Я помню:\n" + "\n".join(f"  • {k}: {v}" for k, v in mem["facts"].items()) if mem["facts"] else "Пока ничего. Напиши «запомни: ключ = значение»."
+    if r: return E["mem_add_msg"](r[1])
+    if l in ("что ты помнишь", "что я просил запомнить", "мои факты", "что ты знаешь обо мне", "память"):
+        return E["mem_list"]()
     for k, v in mem["facts"].items():
         if l == k or l in (f"что такое {k}", f"{k}?", f"что ты знаешь про {k}"): return f"🧠 {k}: {v}"
     if R(r"который час|сколько времени"): return f"🕐 Сейчас {now:%H:%M}"
@@ -298,8 +308,9 @@ def think(m, E):
         if t: t["done"] = True; save(); refresh(); return f"✅ Выполнено: {t['text']}. Так держать{nm}!"
     # --- звуки, игры, дизайн, самостоятельное оформление ---
     snd = R(r"звук|мелоди|рингтон|сигнал|звонок"); want = R(r"созда|сдела|придума|сочин|сгенерир|хочу|нужен|нужна|нужно")
+    GAMEW = R(r"\bигр|game|поигра|сыграем|змейк|понг|арканоид|flappy|флапп|тетрис|tetris|2048")
     setv = R(r"постав|установ|назнач|смени|поменя|использу"); ss = D.get("sounds", [])
-    if snd and want and not R(r"сайт|лендинг"):
+    if snd and want and not R(r"сайт|лендинг") and not GAMEW:
         d = re.sub(r"^(?:ок(?:ей)?[,\s]+|пожалуйста[,\s]+|слушай[,\s]+)?(?:созда\w*|сдела\w*|придума\w*|сочини\w*|сгенерир\w*)\s+(?:мне\s+)?", "", m.strip(), flags=re.I) or m
         if R(r"\bне\b.*постав.*\bа\b.*созда"): d = "приятный звук будильника"
         al = bool(R(r"будильн|разбуд|просып")) or "будильника" in d
@@ -327,13 +338,20 @@ def think(m, E):
         if R(r"убери|скрой|выключ|закрой|удали"): return "Убрал динозаврика. [[game: off]]"
         return "🦖 Динозаврик в левом нижнем углу. Прыгать: клик по полю или пробел. [[game: on]]"
     gk = pick_game(l)
-    if gk and (want or R(r"поигра|запусти|открой|сыграем|\bигр")) and not E.get("LLM"):
-        path = E["make_game"](gk)
-        return f"🎮 Готово: «{GAMES[gk][0]}». Запустил в браузере. Файл: {path}\n(Хочешь свою особенную игру — подключи ИИ: Настройки → бесплатный OpenRouter.)"
-    if want and R(r"\bигр") and not E.get("LLM"):
-        return f"🎮 Собираю игру в студии дизайна: «{m}». Без подключённого ИИ я умею только динозаврика-раннера, со своим ИИ придумаю любую. [[design: game|{m}]]"
+    if gk and (want or R(r"поигра|запусти|открой|сыграем|включи|\bигр")) and not E.get("LLM"):
+        return E["make_game_ask"](gk)
+    if GAMEW and (want or R(r"поигра|сыграем")) and not E.get("LLM"):
+        return ("🎮 Без подключённого ИИ я сразу создаю готовые игры: змейка, пинг-понг, арканоид, flappy, 2048, тетрис и динозаврик. "
+                "Скажи, например: «создай игру змейка». Свою особенную игру Круг придумает с подключённым ИИ (Настройки → бесплатный OpenRouter).")
+    ap = re.match(r"^(?:пожалуйста[, ]+)?(?:открой|запусти|включи|открыть|запустить)\s+(?:мне\s+)?(?:приложени[ея]\s+|программу\s+)?(.+)$", l)
+    if ap and not R(r"музык|песн|трек|плейлист|задач|заметк|расписан|напоминан|привычк|настройк|проект|дизайн|фокус|звук|памят|голос"):
+        r_ = E["open_app"](ap[1])
+        if r_: return r_
+    if R(r"музык|песн[юиь]|трек|плейлист") and R(r"включи|поставь|запусти|найди|сыграй|послушать|что за|определи|угадай|как называется|подбери") and not R(r"будильн|напомин|звонок|рингтон") and not E.get("LLM"):
+        return E["music_cmd"](m)
     self_ui = R(r"приложени|интерфейс|себе|твой|твоё|твое|свой|оформлен|внешн|облик|тему|тема|стиль|цвет")
-    if want and not E.get("LLM") and (R(r"сайт|лендинг|визитк|постер|логотип|анимаци|страниц") or (R(r"дизайн") and R(r"\bдля\b") and not self_ui)):
+    studio = R(r"студи\w*\s+дизайн|в\s+дизайне|во\s+вкладке\s+дизайн")
+    if want and not GAMEW and (studio or (not E.get("LLM") and (R(r"сайт|лендинг|визитк|постер|логотип") or (R(r"дизайн") and R(r"\bдля\b") and not self_ui)))):
         k = "card" if R(r"визитк|постер") else "logo" if R(r"логотип") else "anim" if R(r"анимаци") else "landing"
         return f"🎨 Создаю в студии дизайна: «{m}». [[design: {k}|{m}]]"
     ui_ctx = R(r"дизайн|тем[ауыо]|стил[ьяе]|оформлен|внешн|интерфейс|облик|приложени")
@@ -426,9 +444,9 @@ def fallback(m, E):
     if hits: out.append("🔎 В твоих заметках похожее: " + "; ".join(hits))
     c = difflib.get_close_matches(l, EX, 2, 0.4)
     if c: out.append("Возможно, ты имел в виду:\n" + "\n".join("• " + x for x in c))
-    mem["pending"] = {"k": "save", "text": m}
-    out.append("Свободные вопросы встроенный движок не понимает. Сохранить это как «задачу» или «заметку»? Напиши одно слово.\n"
-               "Для умных ответов: «Настройки» → «Скачать локальный ИИ» (бесплатно, без ключей) или вставь ключ OpenAI / Claude / Gemini. Команды — «помощь».")
+    mem["pending"] = {"k": "save", "text": m}; mem["last_unknown"] = m
+    out.append("Эту фразу я пока не умею. Можно:\n• написать «задача» или «заметка» — сохраню как есть;\n• научить меня: «научи: <ответ или команда>» — запомню и в следующий раз отвечу сам.\n"
+               "Для умных свободных ответов подключи ИИ: Настройки → бесплатный OpenRouter. Команды — «помощь».")
     return "\n\n".join(out)
 
 
@@ -540,6 +558,37 @@ addEventListener('keydown',e=>{if(e.code=='Space'||e.code=='ArrowUp'){e.preventD
 c.addEventListener('pointerdown',flap);loop();
 '''
 
+_TETRIS = r'''
+const C=10,R=20,S=24,OX=12;let grid,cur,nxt,score=0,lines=0,best=LS.g('ttr'),state=0,last=0,delay=600;
+const SH={I:[[1,1,1,1]],O:[[1,1],[1,1]],T:[[0,1,0],[1,1,1]],S:[[0,1,1],[1,1,0]],Z:[[1,1,0],[0,1,1]],J:[[1,0,0],[1,1,1]],L:[[0,0,1],[1,1,1]]};
+const CL={I:'#4dd8ff',O:'#ffd84d',T:'#b04dff',S:'#4dff88',Z:'#ff4d6a',J:'#4d6aff',L:'#ff9a3c'};
+const rnd=()=>{const k=Object.keys(SH)[Math.random()*7|0];return{k,m:SH[k].map(r=>r.slice()),x:3,y:0}};
+const rot=m=>m[0].map((_,i)=>m.map(r=>r[i]).reverse());
+const ok=(m,x,y)=>m.every((r,j)=>r.every((v,i)=>!v||(x+i>=0&&x+i<C&&y+j<R&&(y+j<0||!grid[y+j][x+i]))));
+function reset(){grid=Array.from({length:R},()=>Array(C).fill(0));score=0;lines=0;delay=600;nxt=rnd();spawn();state=1}
+function spawn(){cur=nxt;nxt=rnd();cur.x=3;cur.y=0;if(!ok(cur.m,cur.x,cur.y)){state=2;if(score>best){best=score;LS.s('ttr',best)}}}
+function lock(){cur.m.forEach((r,j)=>r.forEach((v,i)=>{if(v&&cur.y+j>=0)grid[cur.y+j][cur.x+i]=cur.k}));let n=0;for(let j=R-1;j>=0;j--)if(grid[j].every(v=>v)){grid.splice(j,1);grid.unshift(Array(C).fill(0));n++;j++}if(n){lines+=n;score+=[0,100,300,500,800][n];delay=Math.max(120,600-lines*18)}spawn()}
+const step=()=>{if(ok(cur.m,cur.x,cur.y+1))cur.y++;else lock()};
+const mv=d=>{if(ok(cur.m,cur.x+d,cur.y))cur.x+=d};
+function rt(){const m=rot(cur.m);for(const k of [0,-1,1,-2,2])if(ok(m,cur.x+k,cur.y)){cur.m=m;cur.x+=k;return}}
+function drop(){while(ok(cur.m,cur.x,cur.y+1))cur.y++;lock()}
+const cell=(x0,y0,col)=>{x.fillStyle=col;rr(x0+1,y0+1,S-2,S-2,5);x.fill()};
+function draw(){bg();x.strokeStyle='#ffffff10';for(let i=0;i<=C;i++){x.beginPath();x.moveTo(OX+i*S,0);x.lineTo(OX+i*S,R*S);x.stroke()}for(let j=0;j<=R;j++){x.beginPath();x.moveTo(OX,j*S);x.lineTo(OX+C*S,j*S);x.stroke()}
+ if(grid){grid.forEach((r,j)=>r.forEach((v,i)=>{if(v)cell(OX+i*S,j*S,CL[v])}));
+  if(state==1){let gy=cur.y;while(ok(cur.m,cur.x,gy+1))gy++;cur.m.forEach((r,j)=>r.forEach((v,i)=>{if(v){x.globalAlpha=.25;cell(OX+(cur.x+i)*S,(gy+j)*S,CL[cur.k]);x.globalAlpha=1}}));
+   cur.m.forEach((r,j)=>r.forEach((v,i)=>{if(v)cell(OX+(cur.x+i)*S,(cur.y+j)*S,CL[cur.k])}))}}
+ x.fillStyle='#fff';x.font='bold 15px system-ui';x.fillText('Счёт',270,40);x.font='bold 24px system-ui';x.fillText(score,270,68);x.font='14px system-ui';x.fillStyle='#9aa3d8';x.fillText('Линии '+lines,270,92);x.fillText('Рекорд '+best,270,112);x.fillText('Дальше:',270,150);
+ if(nxt)nxt.m.forEach((r,j)=>r.forEach((v,i)=>{if(v)cell(270+i*S,165+j*S,CL[nxt.k])}));
+ if(state==0)ov('ТЕТРИС','Пробел или касание — старт');if(state==2)ov('Игра окончена','Счёт '+score+'. Пробел — заново')}
+function loop(t){if(state==1&&t-last>delay){last=t;step()}draw();requestAnimationFrame(loop)}
+addEventListener('keydown',e=>{if(e.code=='Space'){e.preventDefault();if(state!=1)reset();else drop();return}if(state!=1)return;
+ if(e.code=='ArrowLeft'||e.code=='KeyA'){mv(-1);e.preventDefault()}if(e.code=='ArrowRight'||e.code=='KeyD'){mv(1);e.preventDefault()}
+ if(e.code=='ArrowDown'||e.code=='KeyS'){step();e.preventDefault()}if(e.code=='ArrowUp'||e.code=='KeyW'){rt();e.preventDefault()}});
+let tx=null,ty=0;c.addEventListener('pointerdown',e=>{if(state!=1){reset();return}tx=e.clientX;ty=e.clientY});
+c.addEventListener('pointerup',e=>{if(tx==null||state!=1)return;const dx=e.clientX-tx,dy=e.clientY-ty;tx=null;if(Math.abs(dx)<18&&Math.abs(dy)<18)rt();else if(Math.abs(dx)>Math.abs(dy))mv(dx<0?-1:1);else if(dy>0)drop()});
+loop(0);
+'''
+
 _G2048 = r'''<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>2048</title>
 <style>*{box-sizing:border-box;margin:0}body{min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 30% 20%,#1b1f4a,#0a0b1a 70%);color:#eef;font:16px system-ui,sans-serif;user-select:none}.w{width:min(92vw,420px)}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}h1{font-size:44px}.sc{background:#1b1f4a;border-radius:10px;padding:6px 14px;text-align:center;font-size:12px;color:#9aa3d8}.sc b{display:block;font-size:20px;color:#fff}
 #g{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;background:#12153a;padding:10px;border-radius:14px;touch-action:none;position:relative}.t{aspect-ratio:1;border-radius:10px;display:grid;place-items:center;font-weight:800;font-size:clamp(20px,6vw,32px);background:#1e2250;color:#fff;transition:background .15s}
@@ -570,8 +619,9 @@ GAMES = {
     "breakout": ("Арканоид", _BREAKOUT, 480, 560, "Стрелки или мышь, пробел — запуск мяча"),
     "flappy": ("Flappy", _FLAPPY, 360, 540, "Пробел, клик или касание"),
     "2048": ("2048", None, 0, 0, ""),
+    "tetris": ("Тетрис", _TETRIS, 360, 480, "Стрелки: движение и поворот ↑, пробел — сбросить вниз; на телефоне — свайпы и тап"),
 }
-GK = {"snake": r"змейк|snake", "pong": r"понг|pong|теннис", "breakout": r"арканоид|breakout|кирпич", "flappy": r"flappy|флапп|птиц|птичк", "2048": r"2048"}
+GK = {"tetris": r"тетрис|tetris", "snake": r"змейк|snake", "pong": r"понг|pong|теннис", "breakout": r"арканоид|breakout|кирпич", "flappy": r"flappy|флапп|птиц|птичк", "2048": r"2048"}
 
 def game_html(kind):
     t, js, w, h, hint = GAMES[kind]
