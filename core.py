@@ -98,6 +98,22 @@ def save():
             except RuntimeError: time.sleep(0.05)   # список изменили в другом потоке во время записи
             except Exception: return
 
+# ---------- потокобезопасная работа с D["chat"] ----------
+def chat_append(role, content):
+    """Безопасно добавить сообщение в историю чата."""
+    with _LOCK:
+        D["chat"].append({"role": role, "content": content})
+
+def chat_trim(max_len=80):
+    """Безопасно обрезать историю чата."""
+    with _LOCK:
+        del D["chat"][:-max_len]
+
+def chat_get():
+    """Вернуть копию истории чата."""
+    with _LOCK:
+        return list(D["chat"])
+
 REFRESH = []
 def refresh_all():
     for f in REFRESH:
@@ -140,10 +156,12 @@ def day_plan():
     return "\n".join(L)
 
 # ---------- встроенный помощник (brain.py) ----------
+_think_depth = [0]  # рекурсивный счётчик
+
 def local(m, llm=False):
     global LLM
     LLM = bool(llm)
-    return brain.think(m, globals())
+    return brain.think(m, globals(), _depth=_think_depth[0])
 
 
 # ======================================================================
@@ -327,7 +345,8 @@ def match_rule(m):
         pn = re.sub(r"[^\w\s]", "", r["p"].lower()).strip()
         if pn == n or (len(pn) > 4 and _sim(pn, n) >= 0.9):
             r["n"] = r.get("n", 0) + 1; save(); _RDEPTH[0] += 1
-            try: res = brain.think(r["r"], globals())
+            try:
+                res = brain.think(r["r"], globals(), _depth=_RDEPTH[0])
             finally: _RDEPTH[0] -= 1
             return res if res is not None else r["r"]
     return None

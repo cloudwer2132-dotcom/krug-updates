@@ -178,32 +178,45 @@ def steps_for(task):
 def week_view(D, now):
     L = ["🗓 Неделя:"]
     mon = now.date() - dt.timedelta(days=now.weekday())
+    sched = D.get("sched", []); tasks = D.get("tasks", []); rem = D.get("rem", [])
     for i, d in enumerate(DAYS):
         day = mon + dt.timedelta(days=i); mark = " ← сегодня" if day == now.date() else ""
-        it = [f"{x['time']} {x['text']}" for x in sorted(D["sched"], key=lambda x: x["time"]) if x["day"] == d]
-        it += [f"до: {t['text']}" for t in D["tasks"] if not t["done"] and t["due"] == day.isoformat()]
-        it += [f"{r['when'][11:]} {r['text']}" for r in D["rem"] if r["on"] and r["when"].startswith(day.isoformat())]
+        it = [f"{x.get('time','')} {x.get('text','')}" for x in sorted(sched, key=lambda x: x.get("time","")) if x.get("day") == d]
+        it += [f"до: {t['text']}" for t in tasks if not t.get("done") and t.get("due") == day.isoformat()]
+        it += [f"{r.get('when','')[11:]} {r.get('text','')}" for r in rem if r.get("on") and len(r.get("when","")) > 11 and r["when"].startswith(day.isoformat())]
         L.append(f"  {d} {day:%d.%m}{mark}: " + ("; ".join(it) if it else "—"))
     return "\n".join(L)
 
 def matrix(D, now):
     near = (now + dt.timedelta(days=2)).strftime("%Y-%m-%d"); q = {k: [] for k in "abcd"}
-    for t in D["tasks"]:
-        if t["done"]: continue
-        urg = t["prio"] == "Высокий" or (t["due"] and t["due"] <= near); imp = t["prio"] != "Низкий"
-        q["a" if urg and imp else "b" if imp else "c" if urg else "d"].append(t["text"])
+    for t in D.get("tasks", []):
+        if t.get("done"): continue
+        urg = t.get("prio") == "Высокий" or (t.get("due") and t["due"] <= near); imp = t.get("prio") != "Низкий"
+        q["a" if urg and imp else "b" if imp else "c" if urg else "d"].append(t.get("text", ""))
     nm = {"a": "🔥 Сделай сейчас (срочно+важно)", "b": "📅 Запланируй (важно)", "c": "🤝 Делегируй / быстро (срочно)", "d": "🗑 Можно отложить или удалить"}
     out = [f"{nm[k]}:\n" + "\n".join("  • " + x for x in v) for k, v in q.items() if v]
     return "🧭 Приоритеты по матрице Эйзенхауэра:\n\n" + "\n\n".join(out) if out else "Открытых задач нет — отлично!"
 
 # ---------- главный мозг ----------
-def think(m, E):
+_MAX_DEPTH = 10  # защита от рекурсии
+
+def think(m, E, _depth=0):
+    """Встроенный мозг с защитой от рекурсии."""
+    if m is None: return "Не понял команду."
+    if _depth > _MAX_DEPTH:
+        return "Слишком глубокая вложенность команд. Напишите проще."
     D = E["D"]; now = dt.datetime.now(); l = m.lower().strip().rstrip("!?. ")
     uid, save, refresh = E["uid"], E["save"], E["refresh_all"]
     mem = D.setdefault("mem", {}); mem.setdefault("facts", {}); mem.setdefault("name", "")
+    # Безопасные доступы к спискам — .get с default []
+    tasks = D.get("tasks", [])
+    sched = D.get("sched", [])
+    rem = D.get("rem", [])
+    notes = D.get("notes", [])
+    habits = D.get("habits", [])
     R = lambda p: re.search(p, l)
     def task(txt, prio="Средний", due=""):
-        D["tasks"].append({"id": uid(), "text": txt, "prio": prio, "due": due, "done": False})
+        tasks.append({"id": uid(), "text": txt, "prio": prio, "due": due, "done": False})
     pend = mem.pop("pending", None)
     if pend:
         if pend["k"] == "rem" and not R(r"напомни|будильн|разбуди|таймер|задач|заметк|привычк|покажи|план"):
@@ -214,7 +227,7 @@ def think(m, E):
             save(); refresh(); return f"✅ Добавил задач: {len(pend['items'])}"
         elif pend["k"] == "save" and l.startswith(("задач", "замет")):
             if l.startswith("задач"): task(pend["text"])
-            else: D["notes"].append({"id": uid(), "title": pend["text"][:40], "body": pend["text"]})
+            else: notes.append({"id": uid(), "title": pend["text"][:40], "body": pend["text"]})
             save(); refresh(); return "✅ Сохранил"
     r = re.match(r"^(?:когда я (?:пишу|говорю)|если я (?:пишу|говорю))\s*[:«\"]?\s*(.+?)[»\"]?\s*(?:=|—|->|→|,|то|значит|это)\s*(.+)$", m, re.I)
     if r: return E["learn_rule"](r[1], r[2])
@@ -230,8 +243,8 @@ def think(m, E):
     if l in ("как меня зовут", "кто я"): return f"Тебя зовут {mem['name']}." if mem["name"] else "Ты не говорил. Напиши «меня зовут …»."
     nm = (", " + mem["name"]) if mem["name"] else ""
     if re.match(r"^(привет|здравствуй|добрый (день|вечер)|доброе утро|хай|салют)", l):
-        n = len([t for t in D["tasks"] if not t["done"]])
-        nx = sorted([r_["when"] for r_ in D["rem"] if r_["on"]])
+        n = len([t for t in tasks if not t.get("done")])
+        nx = sorted([r_.get("when", "") for r_ in rem if r_.get("on")])
         return f"Привет{nm}! 👋 Открытых задач: {n}." + (f" Ближайшее напоминание: {nx[0]}." if nx else "") + " Напиши «план», чтобы собрать день."
     if l in ("спасибо", "благодарю", "спс"): return "Всегда пожалуйста! 🙌"
     if l.startswith("как дела"): return "Работаю без сбоев и готов помогать! Что планируем?"
@@ -269,43 +282,47 @@ def think(m, E):
     if R(r"мотивац|вдохнови|поддержи"): return "💬 " + random.choice(QUOTES)
     # списки
     if R(r"^(?:покажи|выведи|список|мои|что у меня по|какие)\s.*задач|^задачи$"):
-        ts = sorted([t for t in D["tasks"] if not t["done"]], key=lambda t: ({"Высокий": 0, "Средний": 1, "Низкий": 2}.get(t["prio"], 1), t["due"] or "9"))
-        return "✅ Открытые задачи:\n" + "\n".join(f"  {i}. [{t['prio'][0]}] {t['text']}" + (f" (до {t['due']})" if t["due"] else "") for i, t in enumerate(ts, 1)) if ts else "Открытых задач нет 🎉"
+        ts = sorted([t for t in tasks if not t.get("done")], key=lambda t: ({"Высокий": 0, "Средний": 1, "Низкий": 2}.get(t.get("prio", "Средний"), 1), t.get("due") or "9"))
+        return "✅ Открытые задачи:\n" + "\n".join(f"  {i}. [{t.get('prio','Средний')[0]}] {t.get('text','')}" + (f" (до {t['due']})" if t.get("due") else "") for i, t in enumerate(ts, 1)) if ts else "Открытых задач нет 🎉"
     if R(r"^(?:покажи|выведи|список|мои)\s.*(?:напоминани|будильник)"):
-        rs = sorted([x for x in D["rem"] if x["on"]], key=lambda x: x["when"])
-        return "⏰ Активные:\n" + "\n".join(f"  {x['when']} — {x['text']} ({x['rep']})" for x in rs) if rs else "Активных напоминаний нет."
+        rs = sorted([x for x in rem if x.get("on")], key=lambda x: x.get("when", ""))
+        return "⏰ Активные:\n" + "\n".join(f"  {x.get('when','')} — {x.get('text','')} ({x.get('rep','')})" for x in rs) if rs else "Активных напоминаний нет."
     if R(r"^(?:покажи|выведи|список|мои)\s.*заметк"):
-        return "📝 Заметки:\n" + "\n".join("  • " + n["title"] for n in D["notes"][-15:]) if D["notes"] else "Заметок пока нет."
+        return "📝 Заметки:\n" + "\n".join("  • " + n.get("title", "") for n in notes[-15:]) if notes else "Заметок пока нет."
     if R(r"^(?:покажи|выведи|список|мои)\s.*привычк"):
         td = now.date().isoformat()
-        return "🔁 Привычки:\n" + "\n".join(f"  {'✅' if td in h['log'] else '⬜'} {h['text']} (серия {len(h['log'])})" for h in D["habits"]) if D["habits"] else "Привычек пока нет."
+        return "🔁 Привычки:\n" + "\n".join(f"  {'✅' if td in h.get('log', []) else '⬜'} {h.get('text','')} (серия {len(h.get('log', []))})" for h in habits) if habits else "Привычек пока нет."
     r = re.match(r"^(?:найди|поищи)\s+(?:заметку\s+)?(.+)$", l)
     if r:
-        q = r[1][:6]; hits = [n for n in D["notes"] if q in (n["title"] + n["body"]).lower()]
-        return "🔎 Нашёл:\n" + "\n".join(f"  • {n['title']}: {n['body'][:80]}" for n in hits[:8]) if hits else "Ничего не нашёл в заметках."
+        q = r[1][:6]; hits = [n for n in notes if q in ((n.get("title","") + n.get("body","")).lower())]
+        return "🔎 Нашёл:\n" + "\n".join(f"  • {n.get('title','')}: {n.get('body','')[:80]}" for n in hits[:8]) if hits else "Ничего не нашёл в заметках."
     r = R(r"расписание на (понедельник|вторник|сред\w+|четверг|пятниц\w+|суббот\w+|воскресенье|сегодня|завтра)")
     if r:
         i = now.weekday() if r[1] == "сегодня" else (now.weekday() + 1) % 7 if r[1] == "завтра" else WDN.index(r[1][:3])
-        it = sorted([x for x in D["sched"] if x["day"] == DAYS[i]], key=lambda x: x["time"])
-        return f"📆 {DAYS[i]}:\n" + "\n".join(f"  {x['time']} — {x['text']}" for x in it) if it else f"На {DAYS[i]} ничего не запланировано."
+        it = sorted([x for x in sched if x.get("day") == DAYS[i]], key=lambda x: x.get("time", ""))
+        return f"📆 {DAYS[i]}:\n" + "\n".join(f"  {x.get('time','')} — {x.get('text','')}" for x in it) if it else f"На {DAYS[i]} ничего не запланировано."
     # действия над элементами
+    _TASK_MAP = {"з": ("tasks", "text"), "н": ("rem", "text"), "б": ("rem", "text"), "ем": ("notes", "title"), "п": ("habits", "text")}
     r = re.match(r"^(?:удали|убери|отмени)\s+(задачу|напоминание|будильник|заметку|привычку)\s*:?\s*(.+)$", m, re.I)
     if r:
-        k = {"з": "tasks", "н": "rem", "б": "rem", "ем": "notes", "п": "habits"}[("ем" if r[1].lower().startswith("заме") else r[1][0].lower())]
-        it = find(D[k], r[2], "title" if k == "notes" else "text")
-        if it: D[k].remove(it); save(); refresh(); return "🗑 Удалил: " + it.get("text", it.get("title", ""))
+        k = ("ем" if r[1].lower().startswith("заме") else r[1][0].lower())
+        key_name, find_key = _TASK_MAP.get(k, ("tasks", "text"))
+        src = D.get(key_name, [])
+        it = find(src, r[2], find_key)
+        if it:
+            src.remove(it); save(); refresh(); return "🗑 Удалил: " + it.get(find_key, it.get("title", ""))
         return "Не нашёл такое."
     if R(r"удали (?:все )?выполненн"):
-        n = len([t for t in D["tasks"] if t["done"]]); D["tasks"] = [t for t in D["tasks"] if not t["done"]]; save(); refresh(); return f"🗑 Убрал выполненных: {n}"
+        n = len([t for t in tasks if t.get("done")]); D["tasks"][:] = [t for t in tasks if not t.get("done")]; save(); refresh(); return f"🗑 Убрал выполненных: {n}"
     r = re.match(r"^(?:я\s+)?(?:выполнил[а]?|сделал[а]?|закончил[а]?|заверши|завершил[а]?|готово|отметь(?:\s+выполненной)?)\s*(?:задачу|привычку)?:?\s*(.+)$", m, re.I)
     if r:
-        h = find(D["habits"], r[1]) if ("привыч" in l or not find([t for t in D["tasks"] if not t["done"]], r[1])) else None
+        h = find(habits, r[1]) if ("привыч" in l or not find([t for t in tasks if not t.get("done")], r[1])) else None
         if h:
             td = now.date().isoformat()
-            if td not in h["log"]: h["log"].append(td)
-            save(); refresh(); return f"🔥 Отмечено: {h['text']} (серия {len(h['log'])})"
-        t = find([t for t in D["tasks"] if not t["done"]], r[1])
-        if t: t["done"] = True; save(); refresh(); return f"✅ Выполнено: {t['text']}. Так держать{nm}!"
+            if td not in h.get("log", []): h["log"].append(td)
+            save(); refresh(); return f"🔥 Отмечено: {h.get('text','')} (серия {len(h.get('log', []))})"
+        t = find([t for t in tasks if not t.get("done")], r[1])
+        if t: t["done"] = True; save(); refresh(); return f"✅ Выполнено: {t.get('text','')}. Так держать{nm}!"
     # --- звуки, игры, дизайн, самостоятельное оформление ---
     snd = R(r"звук|мелоди|рингтон|сигнал|звонок"); want = R(r"созда|сдела|придума|сочин|сгенерир|хочу|нужен|нужна|нужно")
     GAMEW = R(r"\bигр|game|поигра|сыграем|змейк|понг|арканоид|flappy|флапп|тетрис|tetris|2048")
@@ -316,24 +333,24 @@ def think(m, E):
         al = bool(R(r"будильн|разбуд|просып")) or "будильника" in d
         return f"🎵 Сочиняю звук: «{d}». " + ("Поставлю на ближайший будильник." if al else "Добавлю в библиотеку «Звуки».") + f" [[sound: {d}||{'alarm' if al else 'lib'}]]"
     if snd and setv:
-        pick = next((s for s in ss if s["name"].lower() in l), None)
+        pick = next((s for s in ss if s.get("name","").lower() in l), None)
         if not pick and ss and R(r"последн|нов|этот|его|её|ее|созданн"): pick = ss[-1]
         if not pick:
             w = [x for x in re.findall(r"\w{4,}", l) if not x.startswith(("звук", "будиль", "постав", "устан", "назна"))]
-            pick = next((s for s in ss if any(x[:5] in s["name"].lower() for x in w)), None) if w else None
-        if not pick: return "Какой звук поставить? В библиотеке: " + (", ".join(s["name"] for s in ss[-8:]) or "пусто, скажи «создай нежный звук для будильника»") + "."
-        act = sorted([r_ for r_ in D["rem"] if r_["on"]], key=lambda r_: r_["when"])
-        if R(r"будильн"): act = [r_ for r_ in act if r_["kind"] == "Будильник"] or act
+            pick = next((s for s in ss if any(x[:5] in s.get("name","").lower() for x in w)), None) if w else None
+        if not pick: return "Какой звук поставить? В библиотеке: " + (", ".join(s.get("name","") for s in ss[-8:]) or "пусто, скажи «создай нежный звук для будильника»") + "."
+        act = sorted([r_ for r_ in rem if r_.get("on")], key=lambda r_: r_.get("when", ""))
+        if R(r"будильн"): act = [r_ for r_ in act if r_.get("kind") == "Будильник"] or act
         tm = re.search(r"(\d{1,2})[:.](\d{2})", l)
-        if tm: act = [r_ for r_ in act if r_["when"][11:] == f"{int(tm[1]):02d}:{tm[2]}"] or act
+        if tm and act: act = [r_ for r_ in act if r_.get("when","")[11:] == f"{int(tm[1]):02d}:{tm[2]}"] or act
         if not act: return "Нет активных будильников и напоминаний. Сначала поставь будильник."
         act[0]["sound"] = pick["id"]; save(); refresh()
-        return f"🎵 Готово: на «{act[0]['text']}» ({act[0]['when'][11:]}) теперь играет «{pick['name']}»."
+        return f"🎵 Готово: на «{act[0].get('text','')}» ({act[0].get('when','')[11:]}) теперь играет «{pick['name']}»."
     if R(r"какой звук|что за звук|какая мелоди") and R(r"будильн|напомин"):
-        act = sorted([r_ for r_ in D["rem"] if r_["on"]], key=lambda r_: r_["when"])
+        act = sorted([r_ for r_ in rem if r_.get("on")], key=lambda r_: r_.get("when", ""))
         if not act: return "Активных будильников нет."
         s0 = next((x for x in ss if x["id"] == act[0].get("sound")), None)
-        return f"⏰ Ближайший: «{act[0]['text']}» в {act[0]['when'][11:]}. " + (f"Звук: «{s0['name']}»." if s0 else "Звук обычный.") + " Другой? Скажи: «создай нежный звук для будильника»."
+        return f"⏰ Ближайший: «{act[0].get('text','')}» в {act[0].get('when','')[11:]}. " + (f"Звук: «{s0['name']}»." if s0 else "Звук обычный.") + " Другой? Скажи: «создай нежный звук для будильника»."
     if R(r"динозавр|dino"):
         if R(r"убери|скрой|выключ|закрой|удали"): return "Убрал динозаврика. [[game: off]]"
         return "🦖 Динозаврик в левом нижнем углу. Прыгать: клик по полю или пробел. [[game: on]]"
@@ -378,8 +395,8 @@ def think(m, E):
             return "🎨 Свободную перерисовку интерфейса делает подключённый ИИ (Настройки). Без него могу применить стили: киберпанк, уют, минимализм, неон, океан, закат, лес, сакура, золото, матрица, космос, ретро; сменить акцентный цвет («акцент красный»), скруглить углы, включить звёзды или сетку на фоне."
         return f"🎨 Перерисовываю интерфейс… [[restyle: {m}]]"
     if l in ("расписание", "покажи расписание", "моё расписание", "мое расписание", "что в расписании"):
-        rows = sorted(D["sched"], key=lambda x: (DAYS.index(x["day"]) if x["day"] in DAYS else 9, x["time"]))
-        return ("📆 Расписание:\n" + "\n".join(f"  {x['day']} {x['time']} — {x['text']}" for x in rows)) if rows else "Расписание пусто. Скажи: «добавь в расписание пн,ср 18:00 английский»."
+        rows = sorted(sched, key=lambda x: (DAYS.index(x.get("day","")) if x.get("day","") in DAYS else 9, x.get("time","")))
+        return ("📆 Расписание:\n" + "\n".join(f"  {x.get('day','')} {x.get('time','')} — {x.get('text','')}" for x in rows)) if rows else "Расписание пусто. Скажи: «добавь в расписание пн,ср 18:00 английский»."
     # напоминания, будильники, таймеры
     if R(r"напомни|будильн|разбуди|таймер"):
         kind = "Будильник" if R(r"будильн|разбуди") else "Напоминание"
@@ -393,13 +410,14 @@ def think(m, E):
     r = re.match(r"^(?:добавь\s+в\s+расписание|расписание)[:\s]+((?:(?:пн|вт|ср|чт|пт|сб|вс)[\s,]*)+)\s*(\d{1,2})[:.](\d{2})\s+(.+)$", m, re.I)
     if r:
         ds = [d.capitalize() for d in re.findall(r"(пн|вт|ср|чт|пт|сб|вс)", r[1].lower())]
-        for d in ds: D["sched"].append({"id": uid(), "day": d, "time": f"{int(r[2]):02d}:{r[3]}", "text": r[4]})
+        sched_entry = {"id": uid(), "day": d, "time": f"{int(r[2]):02d}:{r[3]}", "text": r[4]} if (d := (ds[0] if ds else "")) else {}
+        for d2 in ds: D["sched"].append({"id": uid(), "day": d2, "time": f"{int(r[2]):02d}:{r[3]}", "text": r[4]})
         save(); refresh(); return f"📆 Добавил в расписание: {', '.join(ds)} {int(r[2]):02d}:{r[3]} — {r[4]}"
     # заметки, привычки, задачи
     r = re.match(r"^(?:добавь |создай |запиши )?заметк[ауи]?[:\s-]+(.+)", m, re.I)
-    if r: D["notes"].append({"id": uid(), "title": r[1][:40], "body": r[1]}); save(); refresh(); return "📝 Заметка сохранена"
+    if r: notes.append({"id": uid(), "title": r[1][:40], "body": r[1]}); save(); refresh(); return "📝 Заметка сохранена"
     r = re.match(r"^(?:добавь |создай )?привычк[ауи]?[:\s-]+(.+)", m, re.I)
-    if r and not l.startswith("отметь"): D["habits"].append({"id": uid(), "text": r[1], "log": []}); save(); refresh(); return f"🔁 Привычка добавлена: {r[1]}"
+    if r and not l.startswith("отметь"): habits.append({"id": uid(), "text": r[1], "log": []}); save(); refresh(); return f"🔁 Привычка добавлена: {r[1]}"
     r = re.match(r"^(?:добавь |создай |запиши |поставь )?(?:мне )?задач[ауи]?[:\s-]+(.+)", m, re.I) or re.match(r"^(?:мне\s+)?(?:надо|нужно|не забыть|не забудь)\s+(.{3,})", m, re.I)
     if r:
         txt = r[1]; prio = "Высокий" if re.search(r"срочно|важно|!!", txt, re.I) else "Низкий" if re.search(r"не срочно|потом|когда-нибудь", txt, re.I) else "Средний"
@@ -412,9 +430,9 @@ def think(m, E):
     if l in ("план", "/план", "план на день", "составь план", "план на сегодня", "мой план") or R(r"^(?:составь|покажи|сделай) план (?:на день|на сегодня)"): return E["day_plan"]()
     if R(r"приоритиз|расставь приоритет|что важнее|с чего начать день"): return matrix(D, now)
     if R(r"итоги|итог дня|статистик|как я справ"):
-        done = len([t for t in D["tasks"] if t["done"]]); op = len(D["tasks"]) - done; td = now.date().isoformat()
-        hb = len([h for h in D["habits"] if td in h["log"]])
-        return f"📊 Выполнено задач: {done}, осталось: {op}. Привычек сегодня: {hb}/{len(D['habits'])}." + (" Отличный прогресс!" if done > op else " Выбери одну главную задачу и начни с неё.")
+        done = len([t for t in tasks if t.get("done")]); op = len(tasks) - done; td = now.date().isoformat()
+        hb = len([h for h in habits if td in h.get("log", [])])
+        return f"📊 Выполнено задач: {done}, осталось: {op}. Привычек сегодня: {hb}/{len(habits)}." + (" Отличный прогресс!" if done > op else " Выбери одну главную задачу и начни с неё.")
     if E.get("LLM"): return None
     for k, v in TPL.items():
         if k in l and R(r"план|состав|режим|распорядок"): return v
@@ -440,7 +458,7 @@ def think(m, E):
 def fallback(m, E):
     D = E["D"]; mem = D.setdefault("mem", {}); l = m.lower(); out = []
     words = re.findall(r"\w{4,}", l)
-    hits = [n["title"] for n in D["notes"] if any(w[:5] in (n["title"] + n["body"]).lower() for w in words)][:5]
+    hits = [n.get("title","") for n in D.get("notes", []) if any(w[:5] in ((n.get("title","") + n.get("body","")).lower()) for w in words)][:5]
     if hits: out.append("🔎 В твоих заметках похожее: " + "; ".join(hits))
     c = difflib.get_close_matches(l, EX, 2, 0.4)
     if c: out.append("Возможно, ты имел в виду:\n" + "\n".join("• " + x for x in c))

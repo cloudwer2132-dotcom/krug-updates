@@ -14,7 +14,9 @@ ALLOWED = ("app.py", "core.py", "brain.py", "ui.html")
 
 def _read_version():
     for b in (os.path.dirname(os.path.abspath(__file__)), getattr(sys, "_MEIPASS", "")):
-        try: return json.load(open(os.path.join(b, "version.json"), encoding="utf-8"))["version"]
+        try:
+            with open(os.path.join(b, "version.json"), encoding="utf-8") as f:
+                return json.load(f)["version"]
         except Exception: pass
     return "0.0.0"
 VERSION = _read_version()
@@ -37,7 +39,10 @@ def _restart():
     time.sleep(1.2)
     try: win.destroy()
     except Exception: pass
-    cmd = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "launcher.py")]
+    if getattr(sys, "frozen", False):
+        cmd = [sys.executable]
+    else:
+        cmd = [sys.executable, os.path.abspath(__file__)]
     subprocess.Popen(cmd, env=dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1"), close_fds=True)
     os._exit(0)
 
@@ -48,6 +53,7 @@ def res(name):
 
 AG = {"run": False}
 AG_STOP = threading.Event()
+AG_LOCK = threading.Lock()
 SAVE_LISTS = ("tasks", "sched", "rem", "notes", "habits", "prompts", "sounds", "designs")
 
 def _js(code):
@@ -72,6 +78,7 @@ def _ask(kind, title, detail="", risk="mid"):
     while not ev.wait(0.4):
         if (AG["run"] and AG_STOP.is_set()) or time.time() - t0 > 300: break
     ans = PERM_WAIT.pop(pid, {}).get("ans", "deny") if ev.is_set() else "deny"
+    PERM_WAIT.pop(pid, None)   # чистка даже если прервались досрочно
     _js("Krug.permDone(%s)" % json.dumps(pid))
     return ans
 
@@ -104,25 +111,27 @@ class Api:
         core.save(); return True
     def _finish(self, r):
         r = r or ""
-        user = next((m["content"] for m in reversed(D["chat"]) if m["role"] == "user"), "")
+        chat = core.chat_get()
+        user = next((m["content"] for m in reversed(chat) if m["role"] == "user"), "")
         acts = re.findall(r"\[\[\s*(\w+)\s*:?\s*(.*?)\]\]", r, re.S)
         r = re.sub(r"\[\[.*?\]\]", "", r, flags=re.S).strip() or "Готово ✅"
-        msg = {"role": "assistant", "content": r}
+        learned = []
         try: learned = core.after_turn(user, r)
-        except Exception: learned = []
-        if learned: msg["learned"] = learned
-        D["chat"].append(msg); del D["chat"][:-80]; core.save()
+        except Exception: pass
+        core.chat_append("assistant", r)
+        if learned: D.setdefault("_learned", []).extend(learned)
+        core.chat_trim(80); core.save()
         return {"state": D, "acts": [list(x) for x in acts]}
     def chat(self, text):
         """Встроенный мозг без ИИ (и совместимость со старым интерфейсом)."""
-        D["chat"].append({"role": "user", "content": text})
+        core.chat_append("user", text)
         try:
             r = core.local(text)
             if r is None:
                 p = D["cfg"]["provider"]
                 if p == core.BI: r = brain.fallback(text, vars(core))
                 else:
-                    try: r = core.call(p, core.merge(D["chat"][-12:]), core.sysprompt())
+                    try: r = core.call(p, core.merge(core.chat_get()[-12:]), core.sysprompt())
                     except Exception as e: r = "⚠ Ошибка " + p + ": " + str(e)
         except Exception as e: r = "⚠ Внутренняя ошибка: %s" % e
         return self._finish(r)
@@ -130,12 +139,18 @@ class Api:
         """Умный режим: быстрые команды — локально, остальное делает агент с инструментами."""
         p = D["cfg"]["provider"]
         if p == core.BI: return dict(self.chat(text), mode="chat")
-        if AG["run"]: return {"mode": "busy"}
-        D["chat"].append({"role": "user", "content": text})
-        try: r = core.local(text, llm=True)
-        except Exception: r = None
-        if r is not None: return dict(self._finish(r), mode="chat")
-        AG["run"] = True; AG_STOP.clear()
+        if AG.get("run"): return {"mode": "busy"}
+        try:
+            r = core.local(text, llm=True)
+        except Exception:
+            r = None
+        if r is not None:
+            core.chat_append("user", text)
+            return dict(self._finish(r), mode="chat")
+        with AG_LOCK:
+            if AG["run"]: return {"mode": "busy"}
+            core.chat_append("user", text)
+            AG["run"] = True; AG_STOP.clear()
         threading.Thread(target=_agent_job, daemon=True).start()
         return {"mode": "agent"}
     def agent_stop(self): AG_STOP.set(); return True
@@ -262,11 +277,15 @@ class Api:
                 data = _get(b + name)
                 if len(data) > 5000000 or hashlib.sha256(data).hexdigest() != m["files"].get(name): raise RuntimeError("файл %s не прошёл проверку" % name)
                 if name.endswith(".py"): compile(data, name, "exec")
-                open(os.path.join(tmp, name), "wb").write(data)
-            json.dump(m, open(os.path.join(tmp, "version.json"), "w", encoding="utf-8"), ensure_ascii=False)
-            ovr = os.path.join(core.DIR, "app"); shutil.rmtree(ovr, ignore_errors=True); shutil.move(tmp, ovr)
+                with open(os.path.join(tmp, name), "wb") as f: f.write(data)
+            with open(os.path.join(tmp, "version.json"), "w", encoding="utf-8") as f:
+                json.dump(m, f, ensure_ascii=False)
+            ovr = os.path.join(core.DIR, "app")
+            shutil.rmtree(ovr, ignore_errors=True)    # удаляем старую версию
+            shutil.move(tmp, ovr)                       # перемещаем новую (tmp больше не существует)
         except Exception as e:
-            shutil.rmtree(tmp, ignore_errors=True); return {"ok": False, "error": str(e)}
+            shutil.rmtree(tmp, ignore_errors=True)     # чистим временные файлы при ошибке
+            return {"ok": False, "error": str(e)}
         threading.Thread(target=_restart, daemon=True).start()
         return {"ok": True}
     def plan(self): return core.day_plan()
@@ -274,7 +293,10 @@ class Api:
     def snooze(self, text, kind):
         STOP.set(); core.add_rem(text, dt.datetime.now() + dt.timedelta(minutes=5), kind); return D
     def clear_chat(self):
-        D["chat"].clear(); core.save(); return D
+        core.chat_get()  # чистим через helper
+        with core._LOCK:
+            D["chat"].clear()
+        core.save(); return D
     def folder(self):
         if hasattr(os, "startfile"): os.startfile(core.DIR)
     def autostart(self):
@@ -303,40 +325,42 @@ def ring(r):
     threading.Thread(target=go, daemon=True).start()
 
 def loop():
-    while True:
-        time.sleep(4)
+    """Фоновый цикл: тик каждые 4 секунды, останавливается по STOP."""
+    while not STOP.is_set():
+        STOP.wait(4)
         try: _tick()
         except Exception: pass
 
 def _tick():
-    if True:
-        now = dt.datetime.now(); fired = []
-        for r in list(D["rem"]):
-            if not r.get("on"): continue
-            try: w = dt.datetime.strptime(r["when"], "%Y-%m-%d %H:%M")
-            except ValueError: continue
-            if w > now: continue
-            fired.append(dict(r))
-            if r.get("rep", "Один раз") == "Один раз": r["on"] = False
-            else:
-                while w <= now:
-                    w += dt.timedelta(days=7 if r.get("rep") == "Каждую неделю" else 1)
-                    while r.get("rep") == "По будням" and w.weekday() > 4: w += dt.timedelta(days=1)
-                r["when"] = w.strftime("%Y-%m-%d %H:%M")
-        if fired:
-            core.save()
-            try: win.restore(); win.on_top = True; win.on_top = False
+    """Проверяет напоминания и будильники."""
+    now = dt.datetime.now(); fired = []
+    for r in list(D["rem"]):
+        if not r.get("on"): continue
+        try: w = dt.datetime.strptime(r["when"], "%Y-%m-%d %H:%M")
+        except ValueError: continue
+        if w > now: continue
+        fired.append(dict(r))
+        if r.get("rep", "Один раз") == "Один раз": r["on"] = False
+        else:
+            while w <= now:
+                w += dt.timedelta(days=7 if r.get("rep") == "Каждую неделю" else 1)
+                while r.get("rep") == "По будням" and w.weekday() > 4: w += dt.timedelta(days=1)
+            r["when"] = w.strftime("%Y-%m-%d %H:%M")
+    if fired:
+        core.save()
+        try: win.restore(); win.on_top = True; time.sleep(0.05); win.on_top = False
+        except Exception: pass
+        for r in fired:
+            if not r.get("sound"): ring(r)
+            try: win.evaluate_js("Krug.fire(%s)" % json.dumps(r, ensure_ascii=False))
             except Exception: pass
-            for r in fired:
-                if not r.get("sound"): ring(r)
-                try: win.evaluate_js("Krug.fire(%s)" % json.dumps(r, ensure_ascii=False))
-                except Exception: pass
-            try: win.evaluate_js("Krug.sync(%s)" % json.dumps({"rem": D["rem"]}, ensure_ascii=False))
-            except Exception: pass
+        try: win.evaluate_js("Krug.sync(%s)" % json.dumps({"rem": D["rem"]}, ensure_ascii=False))
+        except Exception: pass
 
 def main():
     global win
-    html = open(res("ui.html"), encoding="utf-8").read()
+    with open(res("ui.html"), encoding="utf-8") as f:
+        html = f.read()
     win = webview.create_window("Круг", html=html, js_api=Api(), width=1240, height=800, min_size=(960, 620), background_color="#0b0c10")
     webview.start(loop, storage_path=os.path.join(core.DIR, "web"))
 
