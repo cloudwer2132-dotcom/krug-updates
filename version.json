@@ -1,11 +1,11 @@
 {
- "version": "5.0.0",
- "notes": "Круг 5.0: голосовая вкладка, музыка, память и самообучение, доступ к ПК с разрешением на каждое действие, игры, статус работы, исправления",
+ "version": "5.0.1",
+ "notes": "Круг 5.0.1: исправлено 20 багов — race conditions, memory leaks, protected API, safe list access, fixed crash on empty data, no more double agents",
  "min_launcher": 1,
  "files": {
-  "app.py": "e70410da49951de0ae9af4fa535f2646669765e3bc463e7f48da644f619b1b45",
-  "core.py": "9d9f635d997409bbf3de6855a3d1db6ad9a90de623159c4e36d9e4e187b73315",
-  "brain.py": "558f8a7024e1ce460e198798fefe555236f68747725f881c8fd2491488cb6497",
-  "ui.html": "afcd35dd59b361aabbf47e758aa4009a081680fbb6ea72a59153c21b88a710c6"
+  "app.py": "521f2b75ac925f01a82f49412f9b42257835546f487ba669dd9425b7b1ec2178",
+  "core.py": "ec3150c939e39083b2cc3dc58dbbbd2ccd4c4a7092a6abfc587ad7586ad0231d",
+  "brain.py": "e617e2c79b07ed347dc07805b62ca926a3a3c8020bdaa02f396840aaa0a31520",
+  "ui.html": "6dc13cb48ea4218aec1b636550ca15013db998944752110d9e20eb74c31bf107"
  }
 }
