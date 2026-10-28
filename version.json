@@ -1,6 +1,6 @@
 {
- "version": "5.1.0",
- "notes": "Круг 5.1: умный Brain с контекстом и негативными фильтрами, полный редизайн glassmorphism, smoother animations, better typography, protected API",
+ "version": "5.0.2",
+ "notes": "Круг 5.0.2: умный Brain с контекстом и негативными фильтрами, полный редизайн glassmorphism, smoother animations, better typography, protected API",
  "min_launcher": 1,
  "files": {
   "app.py": "521f2b75ac925f01a82f49412f9b42257835546f487ba669dd9425b7b1ec2178",
