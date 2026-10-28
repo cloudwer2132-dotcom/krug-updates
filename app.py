@@ -60,6 +60,23 @@ def _confirm(title, msg):
     try: return bool(win.create_confirmation_dialog(title, msg))
     except Exception: return False
 
+PERM_WAIT = {}
+
+def _ask(kind, title, detail="", risk="mid"):
+    """Окно «Разрешаю / Отклонить». Ждём ответ пользователя до 5 минут; «Стоп» или тишина = отказ."""
+    pid = uuid.uuid4().hex[:8]; ev = threading.Event(); PERM_WAIT[pid] = {"ev": ev, "ans": "deny"}
+    try: win.restore()
+    except Exception: pass
+    shown = _js("Krug.perm(%s)" % json.dumps({"id": pid, "kind": kind, "title": title, "detail": detail[:700], "risk": risk}, ensure_ascii=False))
+    t0 = time.time()
+    while not ev.wait(0.4):
+        if (AG["run"] and AG_STOP.is_set()) or time.time() - t0 > 300: break
+    ans = PERM_WAIT.pop(pid, {}).get("ans", "deny") if ev.is_set() else "deny"
+    _js("Krug.permDone(%s)" % json.dumps(pid))
+    return ans
+
+core.ASK = _ask
+
 def _check_html(html):
     """Страница запускается в скрытом iframe внутри окна Круга; ждём отчёт об ошибках JS."""
     cid = uuid.uuid4().hex[:10]
@@ -87,9 +104,14 @@ class Api:
         core.save(); return True
     def _finish(self, r):
         r = r or ""
+        user = next((m["content"] for m in reversed(D["chat"]) if m["role"] == "user"), "")
         acts = re.findall(r"\[\[\s*(\w+)\s*:?\s*(.*?)\]\]", r, re.S)
         r = re.sub(r"\[\[.*?\]\]", "", r, flags=re.S).strip() or "Готово ✅"
-        D["chat"].append({"role": "assistant", "content": r}); del D["chat"][:-80]; core.save()
+        msg = {"role": "assistant", "content": r}
+        try: learned = core.after_turn(user, r)
+        except Exception: learned = []
+        if learned: msg["learned"] = learned
+        D["chat"].append(msg); del D["chat"][:-80]; core.save()
         return {"state": D, "acts": [list(x) for x in acts]}
     def chat(self, text):
         """Встроенный мозг без ИИ (и совместимость со старым интерфейсом)."""
@@ -117,6 +139,46 @@ class Api:
         threading.Thread(target=_agent_job, daemon=True).start()
         return {"mode": "agent"}
     def agent_stop(self): AG_STOP.set(); return True
+    def ping(self): return True
+    def perm_answer(self, pid, ans):
+        w = PERM_WAIT.get(pid)
+        if w: w["ans"] = ans if ans in ("once", "task") else "deny"; w["ev"].set()
+        return True
+    # --- память и обучение
+    def mem_add_user(self, text, cat="Факты"):
+        core.mem_add(text, cat, "вручную", True); return D["memory"]
+    def mem_del(self, i): D["memory"] = [x for x in D["memory"] if x["id"] != i]; core.save(); return D["memory"]
+    def mem_pin(self, i):
+        for x in D["memory"]:
+            if x["id"] == i: x["pin"] = not x.get("pin")
+        core.save(); return D["memory"]
+    def mem_edit(self, i, text):
+        text = (text or "").strip()
+        if 3 <= len(text) <= 240 and not core.SENS.search(text):
+            for x in D["memory"]:
+                if x["id"] == i: x["t"] = text
+        core.save(); return D["memory"]
+    def mem_clear(self): D["memory"] = []; D["mem"] = {"facts": {}, "name": ""}; core.save(); return D["memory"]
+    def rule_del(self, i): D["learn"]["rules"] = [r for r in D["learn"]["rules"] if r["id"] != i]; core.save(); return D["learn"]["rules"]
+    def learn_clear(self): D["learn"].update(rules=[], lessons=[], freq={}, top=[]); core.save(); return D["learn"]
+    def feedback(self, idx, good, note=""):
+        ok = core.add_feedback(int(idx), bool(good), note); return {"ok": ok, "chat": D["chat"], "learn": D["learn"]}
+    def audit_clear(self): D["audit"] = []; core.save(); return True
+    # --- музыка (кнопки пользователя в самом приложении — отдельное разрешение не нужно)
+    def music_find(self, q):
+        try: return core.music_find(q)
+        except Exception as e: return {"items": [], "note": "Ошибка: %s" % e}
+    def music_play(self, q, service="youtube"):
+        try:
+            core.play_url(core.music_url(q, service, service == "youtube")); core.audit("music", "Кнопка в «Музыке»: " + str(q)[:60], "по клику пользователя"); return ""
+        except Exception as e: return "Не открылось: %s" % e
+    def media(self, action, times=1):
+        try: core.media_key(action, times); return ""
+        except Exception as e: return str(e)
+    def music_local(self): return [{"name": os.path.basename(p), "path": p} for p in core.music_local()]
+    def music_open_file(self, p):
+        try: core.music_open_file(p); core.audit("music", "Кнопка: файл " + os.path.basename(p), "по клику пользователя"); return ""
+        except Exception as e: return str(e)
     def connect_free(self, key):
         key = (key or "").strip()
         if len(key) < 20: return {"ok": False, "error": "ключ слишком короткий. Скопируй его целиком со страницы openrouter.ai/keys"}
@@ -147,7 +209,7 @@ class Api:
             core.open_path(idx); return ""
         except Exception as e: return "Не открылось: %s" % e
     def zip_project(self, name):
-        try: r = core.t_zip_project({"name": name}, "", None); core.open_path(core.WS); return r
+        try: r = core._zip(name); core.open_path(core.WS); return r
         except Exception as e: return "Не вышло: %s" % e
     def delete_project(self, name):
         try:
