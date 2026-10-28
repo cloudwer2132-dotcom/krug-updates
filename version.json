@@ -1,11 +1,11 @@
 {
- "version": "5.0.2",
- "notes": "Круг 5.0.2: умный Brain с контекстом и негативными фильтрами, полный редизайн glassmorphism, smoother animations, better typography, protected API",
+ "version": "5.1.0",
+ "notes": "Круг 5.1: больше не меняет дизайн от обычных слов (приложение, тема, космос и т.д.); открытие программ проверяется и честно сообщает результат; окно разрешений больше не пропадает (запасной системный диалог); агент не пишет «открыл» без действия; «до конца задачи» больше не переносится на другие запросы",
  "min_launcher": 1,
  "files": {
-  "app.py": "521f2b75ac925f01a82f49412f9b42257835546f487ba669dd9425b7b1ec2178",
-  "core.py": "ec3150c939e39083b2cc3dc58dbbbd2ccd4c4a7092a6abfc587ad7586ad0231d",
-  "brain.py": "ae50e91f8bdd7ed676de45d22bc43c3de3300bd361f503304f03c37e5f2b827e",
-  "ui.html": "2b311fe498e194bf3a4b6d1abe61dda1b3d579ddcc60d9fc84908c5d19c8db7f"
+  "app.py": "87ffa16b363b3f1e61da088219292f72641b5c7f5bc64f0b4f7ab78530e76c6d",
+  "core.py": "ceb836275e79d8d06ead005a09c6c08d08b2e2359d5f78b16f80bb795c5010d0",
+  "brain.py": "5e6d3895b9d59fb7cab1389470a384bd5aa71339a3f061168b656fbc0b54457e",
+  "ui.html": "cbfdddca3f26bd7dfa077fa84defc771c4f526fd0f109ad8533b65723113b858"
  }
 }
