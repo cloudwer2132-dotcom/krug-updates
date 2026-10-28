@@ -1,616 +1,649 @@
 # -*- coding: utf-8 -*-
-"""Krug Brain — встроенный офлайн-помощник. Архитектура: parse → intent → action → verify."""
+"""Krug Brain — умный офлайн-помощник с контекстом и структурой."""
 import re, random, math, difflib, ast, operator, datetime as dt
 
 # ============================================================
 # КОНСТАНТЫ
 # ============================================================
 DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-MONTHS_RU = ["января", "февраля", "марта", "апреля", "мая", "июня",
-             "июля", "августа", "сентября", "октября", "ноября", "декабря"]
-MON = {"янв": 1, "фев": 2, "мар": 3, "апр": 4, "мая": 5, "июн": 6,
-       "июл": 7, "авг": 8, "сен": 9, "окт": 10, "ноя": 11, "дек": 12}
-WDN = ["пон", "вто", "сре", "чет", "пят", "суб", "вос"]
-WDN_FULL = {"понедельник": 0, "вторник": 1, "среда": 2, "четверг": 3,
-            "пятница": 4, "суббота": 5, "воскресенье": 6}
+MONTHS_RU = ["января","февраля","марта","апреля","мая","июня",
+             "июля","августа","сентября","октября","ноября","декабря"]
+MON = {"янв":1,"фев":2,"мар":3,"апр":4,"мая":5,"июн":6,"июл":7,"авг":8,"сен":9,"окт":10,"ноя":11,"дек":12}
+WDN = ["пон","вто","сре","чет","пят","суб","вос"]
 
-HELP = """Я Krug Brain — встроенный офлайн-помощник. Понимаю обычные фразы:
-⏰ «напомни через полчаса позвонить маме» · «напомни в пятницу в 18:00 встреча» · «будильник на 7 утра по будням» · «таймер на 10 минут»
-✅ «задача: сдать отчёт срочно до 5 января» · «мне нужно купить молоко» · «покажи задачи» · «сделал отчёт» · «удали задачу молоко»
-📆 «добавь в расписание пн,ср 18:00 английский» · «расписание на пятницу»
-📝 «заметка: идея про сайт» · «найди заметку сайт» · 🔁 «привычка: зарядка» · «отметь привычку зарядка»
-🗓 «план» · «план недели» · «приоритизируй задачи» · «итоги»
-🧩 «составь план изучения Python на 8 недель» · «разбей задачу написать диплом на шаги» · «план тренировок» · «режим дня»
-✨ «напиши промпт для логотипа кофейни» · 🧮 «посчитай 15% от 2400» · «сколько дней до 1 января» · «выбери чай или кофе»
-🎵 «создай приятный звук для будильника» · «поставь звук колокольчик на будильник» · «какой звук на будильнике»
-🎨 «сделай дизайн киберпанк» · «акцент красный» · «круглее» · «звёзды на фоне» · «перерисуй интерфейс сам» (со своим ИИ)
-🎮 «создай игру змейка / пинг-понг / арканоид / flappy / 2048 / тетрис» · 🦖 «создай игру динозаврик» · «сделай лендинг для кофейни»
-📂 «открой калькулятор / блокнот / chrome» (всегда спрашиваю разрешение) · 🎧 «включи музыку спокойный lo-fi» · «что за песня: <строчка>»
-🎓 «когда я пишу утро — план» · «научи: …» · «забудь про …» · «что ты знаешь обо мне»
-🧠 «запомни: пароль от вайфая = 12345» · «что такое помодоро» · «мотивация» · «меня зовут Алекс»"""
-
-QUOTES = [
-    "Маленькие шаги каждый день сильнее редких рывков.",
-    "Начни — мотивация придёт во время работы.",
-    "Не идеально, а сделано. Улучшишь потом.",
-    "Ты не обязан делать всё. Сделай самое важное.",
-    "Дисциплина — это забота о себе из будущего.",
-    "5 минут — тоже прогресс.",
-]
+HELP = """Я Krug Brain — умный помощник. Понимаю фразы как люди:
+⏰ «напомни через 15 минут позвонить маме» · «будильник на 7 утра по будням»
+✅ «задача: сдать отчёт срочно» · «сделал отчёт» · «удали задачу молоко»
+📆 «добавь в расписание пн,ср 18:00 английский»
+📝 «заметка: идея про сайт» · 🔁 «привычка: зарядка»
+🧮 «посчитай 15% от 2400» · 🎮 «игру змейка» · 🎨 «дизайн киберпанк»
+🧠 «запомни: мой email alex@mail.ru» · «что ты обо мне знаешь»
+Скажи «помощь» чтобы увидеть всё."""
 
 # ============================================================
 # УТИЛИТЫ
 # ============================================================
 _ops = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
-        ast.Div: operator.truediv, ast.Pow: operator.pow, ast.Mod: operator.mod,
-        ast.USub: operator.neg, ast.FloorDiv: operator.floordiv}
+        ast.Div: operator.truediv, ast.Pow: operator.pow, ast.Mod: operator.mod, ast.USub: operator.neg}
 
 def calc(e):
-    """Безопасное вычисление математических выражений."""
-    def ev(n):
-        if isinstance(n, ast.Expression): return ev(n.body)
-        if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)): return n.value
-        if isinstance(n, ast.BinOp):
-            a, b = ev(n.left), ev(n.right)
-            if isinstance(n.op, ast.Pow) and abs(b) > 100: raise ValueError
-            return _ops[type(n.op)](a, b)
-        if isinstance(n, ast.UnaryOp): return _ops[type(n.op)](ev(n.operand))
-        raise ValueError
     try:
-        cleaned = e.replace("^", "**").replace(",", ".").replace("×", "*").replace("÷", "/")
+        def ev(n):
+            if isinstance(n, ast.Expression): return ev(n.body)
+            if isinstance(n, ast.Constant) and isinstance(n.value,(int,float)): return n.value
+            if isinstance(n, ast.BinOp):
+                a,b = ev(n.left), ev(n.right)
+                if isinstance(n.op, ast.Pow) and abs(b) > 100: raise ValueError
+                return _ops[type(n.op)](a,b)
+            if isinstance(n, ast.UnaryOp): return _ops[type(n.op)](ev(n.operand))
+            raise ValueError
+        cleaned = e.replace("^","**").replace(",",".").replace("×","*").replace("÷","/")
         return ev(ast.parse(cleaned, mode="eval"))
-    except Exception:
-        return None
+    except: return None
 
-def num(x):
-    return str(int(x)) if float(x).is_integer() else f"{x:.4f}".rstrip("0").rstrip(".")
+def num(x): return str(int(x)) if float(x).is_integer() else f"{x:.4f}".rstrip("0").rstrip(".")
 
 def find(items, q, key="text"):
-    q = q.lower().strip()
     if not q or not items: return None
+    q = q.lower()
     for it in items:
-        if q in str(it.get(key, "")).lower(): return it
+        if q in str(it.get(key,"")).lower(): return it
     try:
-        c = difflib.get_close_matches(q, [str(i.get(key, "")).lower() for i in items], 1, 0.5)
-        if c:
-            return next((i for i in items if c[0] == str(i.get(key, "")).lower()), None)
-    except Exception:
-        pass
+        c = difflib.get_close_matches(q, [str(i.get(key,"")).lower() for i in items], 1, 0.5)
+        if c: return next((i for i in items if c[0]==str(i.get(key,"")).lower()), None)
+    except: pass
     return None
 
-def _sim(a, b):
-    return difflib.SequenceMatcher(None, a, b).ratio() if difflib else (1.0 if a == b else 0.0)
+# ============================================================
+# ПАМЯТЬ КОНТЕКСТА
+# ============================================================
+class Context:
+    """Хранит состояние диалога: что пользователь хотел, какие pending-операции."""
+    def __init__(self):
+        self.pending = None  # pending operation
+        self.last_action = None  # что было сделано в прошлом шаге
+        self.conversation = []  # последние N реплик
+        self.learned = []  # факты из этого диалога
+
+    def store_pending(self, kind, text, **kwargs):
+        """Сохраняет pending-операцию: "добавь в задачи — потом: купить хлеб"."""
+        self.pending = {"kind": kind, "text": text, **kwargs}
+
+    def clear_pending(self):
+        self.pending = None
+
+    def record_action(self, action, details=""):
+        self.last_action = {"action": action, "details": details, "ts": dt.datetime.now()}
+
+    def add_conversation(self, role, text):
+        self.conversation.append({"role": role, "text": text[:100]})
+        if len(self.conversation) > 10:
+            self.conversation = self.conversation[-10:]
+
+_CONTEXT = Context()
 
 # ============================================================
-# ПАРСЕР ДАТЫ/ВРЕМЕНИ
+# ПАРСЕР ДАТЫ
 # ============================================================
 def parse_when(s, now):
-    """Парсит относительные и абсолютные даты из текста. Возвращает (datetime, оставшийся_текст, rep)."""
-    t = " " + s + " "; rep = "Один раз"; wk = False
-
+    t = " "+s+" "; rep = "Один раз"; wk = False
     def take(p):
         nonlocal t
         m = re.search(p, t, re.I)
-        if m: t = t[:m.start()] + " " + t[m.end():]
+        if m: t = t[:m.start()]+" "+t[m.end():]
         return m
 
-    # Повтор
     if take(r"\bпо будням\b"): rep = "По будням"
     elif take(r"\b(?:каждый день|ежедневно)\b"): rep = "Каждый день"
     elif take(r"\b(?:каждую неделю|еженедельно)\b"): rep = "Каждую неделю"
 
     w = None
-    # Относительное время
     m = take(r"через\s+((?:\d+\s*(?:мин|ч|дн|де|нед)\S*\s*)+|полчаса|полтора\s+часа|пару\s+минут|час\b|минуту)")
     if m:
         g = m[1].lower(); mins = 0
-        for n, u in re.findall(r"(\d+)\s*(мин|ч|дн|де|нед)", g):
-            mins += int(n) * {"мин": 1, "ч": 60, "дн": 1440, "де": 1440, "нед": 10080}[u]
-        if not mins:
-            mins = 30 if "полчаса" in g else 90 if "полтора" in g else 2 if "пару" in g else 1 if re.search(r"\d", g) else 60
-        mins = min(mins, 3650 * 1440)
-        w = (now + dt.timedelta(minutes=mins)).replace(second=0, microsecond=0)
+        for n,u in re.findall(r"(\d+)\s*(мин|ч|дн|де|нед)", g):
+            mins += int(n)*{"мин":1,"ч":60,"дн":1440,"де":1440,"нед":10080}[u]
+        if not mins: mins = 30 if "полчаса" in g else 90 if "полтора" in g else 2 if "пару" in g else 60
+        w = (now + dt.timedelta(minutes=min(mins, 5256000))).replace(second=0, microsecond=0)
     else:
         day = None
-        if take(r"\bпослезавтра\b"): day = now.date() + dt.timedelta(days=2)
-        elif take(r"\bзавтра\b"): day = now.date() + dt.timedelta(days=1)
+        if take(r"\bпослезавтра\b"): day = now.date()+dt.timedelta(days=2)
+        elif take(r"\bзавтра\b"): day = now.date()+dt.timedelta(days=1)
         elif take(r"\bсегодня\b"): day = now.date()
         else:
             m = take(r"\b(?:в|во|на)?\s*(понедельник|вторник|сред[ауы]|четверг|пятниц[ауы]|суббот[ауы]|воскресенье)\b")
             if m:
-                day = now.date() + dt.timedelta(days=(WDN_FULL.get(m[1][:8].lower(), -1) if len(m[1]) >= 4
-                                                       else WDN.index(m[1][:3].lower()) if m[1][:3].lower() in WDN
-                                                       else -1) % 7) if m and m[1][:8].lower() in WDN_FULL else (
-                    now.date() + dt.timedelta(days=(WDN.index(m[1][:3].lower()) - now.weekday()) % 7))
-                wk = True
+                idx = WDN.index(m[1][:3].lower()) if m[1][:3].lower() in WDN else -1
+                if idx >= 0:
+                    day = now.date() + dt.timedelta(days=(idx - now.weekday()) % 7)
+                    wk = True
             else:
                 m = take(r"\b(\d{1,2})\s+(янв|фев|мар|апр|мая|июн|июл|авг|сен|окт|ноя|дек)\S*")
                 if m:
                     try:
                         day = dt.date(now.year, MON[m[2].lower()], int(m[1]))
-                        if day < now.date(): day = day.replace(year=now.year + 1)
-                    except ValueError: day = None
-        if day is None:
+                        if day < now.date(): day = day.replace(year=now.year+1)
+                    except: day = None
+        if not day:
             m = take(r"\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b")
             if m:
                 try:
                     y = int(m[3]) if m[3] else now.year
                     if y < 100: y += 2000
                     day = dt.date(y, int(m[2]), int(m[1]))
-                    if not m[3] and day < now.date(): day = day.replace(year=y + 1)
-                except ValueError: day = None
+                    if not m[3] and day < now.date(): day = day.replace(year=y+1)
+                except: pass
         hm = None
         m = take(r"\b(?:в|во|на|к|около)?\s*(\d{1,2})[:.](\d{2})\b")
         if m:
-            if int(m[1]) > 23 or int(m[2]) > 59: return None, s.strip(), rep
-            hm = (int(m[1]), int(m[2]))
+            if 0 <= int(m[1]) <= 23 and 0 <= int(m[2]) <= 59: hm = (int(m[1]), int(m[2]))
         else:
-            m = take(r"\b(?:в|на|к)\s+(\d{1,2})(?:\s*(утра|вечера|дня|ночи|час\S*))?\b")
+            m = take(r"\b(?:в|на|к)\s+(\d{1,2})(?:\s*(утра|вечера|дня|ночи)?)?\b")
             if m:
                 h = int(m[1]); ap = (m[2] or "").lower()
-                if ap in ("вечера", "дня") and h < 12: h += 12
+                if ap in ("вечера","дня") and h < 12: h += 12
                 if ap == "ночи" and h == 12: h = 0
-                hm = (h, 0) if h <= 23 else None
+                if h <= 23: hm = (h, 0)
         if not hm:
             m = take(r"\b(утром|днём|днем|вечером|ночью)\b")
-            if m: hm = {"утр": (9, 0), "днё": (13, 0), "дне": (13, 0), "веч": (19, 0), "ноч": (23, 0)}[m[1][:3].lower()]
-        if hm is None and day is None: return None, s.strip(), rep
-        if day is None:
+            if m: hm = {"утр":(9,0),"днё":(13,0),"дне":(13,0),"веч":(19,0),"ноч":(23,0)}[m[1][:3].lower()]
+        if not hm and not day: return None, s.strip(), rep
+        if not day:
             w = now.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
             if w <= now: w += dt.timedelta(days=1)
         else:
-            w = dt.datetime.combine(day, dt.time(*(hm or (9, 0))))
+            w = dt.datetime.combine(day, dt.time(*(hm or (9,0))))
             if wk and w <= now: w += dt.timedelta(days=7)
     return w, re.sub(r"\s+", " ", t).strip(" ,.-—:"), rep
 
 # ============================================================
-# ИНТЕНТ-ПАКТЕРЫ — с НЕГАТИВНЫМИ ФИЛЬТРАМИ
+# НЕГАТИВНЫЕ ФИЛЬТРЫ
 # ============================================================
-_NEG = r"(?:не\s+|ни\s+|без\s+|отмени|отмену|выход|quit|bye|пока|до\s+свидания|хватит|стоп|досвидания)"
+_NEG_PAT = re.compile(r"^(?:не\s+|ни\s+|без\s+|отмени|отмену|выйти|bye|пока|хватит|стоп|выключ|отменяю|нет)\b")
 
+def is_negative(l):
+    """Проверяет негативный контекст."""
+    if _NEG_PAT.search(l): return True
+    if re.search(r"не\s+хочу|не\s+надо|не\s+нужно|без\s+|отмена|выход", l, re.I): return True
+    return False
+
+# ============================================================
+# ИНТЕНТ-СИСТЕМА
+# ============================================================
+class Intent:
+    def __init__(self, name, pattern, handler, neg=False, priority=0):
+        self.name = name
+        self.pattern = re.compile(pattern, re.I)
+        self.handler = handler
+        self.neg = neg  # игнорировать при негативе
+        self.priority = priority
+
+# Регистрация намерений
 INTENTS = [
     # --- Справка ---
-    {"id": "help", "pat": re.compile(r"^(помощь|help|что\s+ты\s+умеешь|что\s+умеешь|команды|справка)", re.I),
-     "neg": re.compile(_NEG, re.I), "reply": HELP},
+    Intent("help", r"^(помощь|help|что\s+ты\s+умеешь|команды|справка)",
+           lambda E, l: HELP, neg=True),
 
     # --- Приветствие ---
-    {"id": "greet", "pat": re.compile(r"^(привет|здравствуй|добрый\s+(день|вечер|утро)|хай|салют|hello|hi)", re.I), "neg": re.compile(_NEG, re.I)},
+    Intent("greet", r"^(привет|здравствуй|добрый\s+(день|вечер|утро)|хай|hello|hi)\b",
+           lambda E, l: _handle_greet(E)),
 
     # --- Благодарность ---
-    {"id": "thanks", "pat": re.compile(r"^(спасибо|благодарю|спс|thanks)", re.I), "neg": re.compile(_NEG, re.I), "reply": "Всегда пожалуйста! 🙌"},
+    Intent("thanks", r"^(спасибо|благодарю|спс|thanks)\b",
+           lambda E, l: "Всегда пожалуйста! 🙌", neg=True),
 
     # --- Кто ты ---
-    {"id": "whoami", "pat": re.compile(r"^(кто\s+ты|ты\s+кто|ты\s+ии?|что\s+ты)", re.I), "neg": re.compile(_NEG, re.I),
-     "reply": "Я Krug Brain — встроенный офлайн-помощник Круга. Выполняю команды, понимаю даты, планирую и помню факты."},
+    Intent("whoami", r"^(кто\s+ты|ты\s+кто|что\s+ты\s+такое)\b",
+           lambda E, l: "Я Krug Brain — встроенный умный помощник. Понимаю команды, даты, задачи, напоминания, планирование, музыку, игры и многое другое.", neg=True),
 
     # --- Вычисление ---
-    {"id": "calc", "pat": re.compile(r"^(?:посчитай|сколько\s+будет|calc|=|(?=.*\d.*[\+\-*/^%×÷]).{3,})"),
-     "neg": re.compile(_NEG, re.I)},
+    Intent("calc", r"^(?:посчитай|сколько\s+будет|посчитай|сколько\s+процент|посчитай\s+(\d+)\s*%\s*от)\s*(.+)",
+           lambda E, l: _handle_calc(l)),
 
-    # --- Загадка (монетка/кубик) ---
-    {"id": "random", "pat": re.compile(r"монетк|кубик|выбери.+(?:или|,)"), "neg": re.compile(_NEG, re.I)},
+    # --- Случайное ---
+    Intent("random", r"(?:монетк|кубик)\b",
+           lambda E, l: "🪙 "+random.choice(["Орёл","Решка"]) if "монетк" in l else "🎲 "+str(random.randint(1,6)), neg=True),
+    Intent("random_choice", r"выбери\s+(.+?)(?:\s+или\s+|,)\s*(.+)",
+           lambda E, l: "🎯 "+random.choice([x.strip() for x in re.sub(r".*?\s+или\s+|,","|",l).split("|") if x.strip()])),
 
     # --- Мотивация ---
-    {"id": "motivation", "pat": re.compile(r"мотивац|вдохнови|поддержи|демотивац|плохо"), "neg": re.compile(_NEG, re.I)},
+    Intent("motivation", r"мотивац|вдохнови|поддержи",
+           lambda E, l: "💬 "+random.choice(["Маленькие шаги каждый день сильнее редких рывков.","Начни — мотивация придёт во время работы.","Не идеально, а сделано.","Ты не обязан делать всё. Сделай самое важное.","Дисциплина — это забота о себе из будущего."]), neg=True),
 
-    # --- Показ задач ---
-    {"id": "list_tasks", "pat": re.compile(r"^(?:покажи|выведи|список|мои|что\s+у\s+меня\s+по|какие).*задач|^задачи$"),
-     "neg": re.compile(_NEG, re.I)},
+    # --- Контекстные ответы (yes/no/done в контексте) ---
+    Intent("context_yes", r"^(да|давай|добавь|добавь в задачи|добавить|ок|хорошо|сделай)\b",
+           lambda E, l: _handle_context(E, "accept")),
+    Intent("context_no", r"^(нет|не надо|не нужно|отмена|отменяю|стоп|хватит|выключ|не)\b",
+           lambda E, l: _handle_context(E, "deny")),
 
-    # --- Показ напоминаний ---
-    {"id": "list_rem", "pat": re.compile(r"^(?:покажи|выведи|список|мои).*(?:напоминани|будильник)", re.I),
-     "neg": re.compile(_NEG, re.I)},
-
-    # --- Показ заметок ---
-    {"id": "list_notes", "pat": re.compile(r"^(?:покажи|выведи|список|мои).*заметк", re.I),
-     "neg": re.compile(_NEG, re.I)},
-
-    # --- Показ привычек ---
-    {"id": "list_habits", "pat": re.compile(r"^(?:покажи|выведи|список|мои).*привычк", re.I),
-     "neg": re.compile(_NEG, re.I)},
+    # --- Показать списки ---
+    Intent("list_tasks", r"^(?:покажи|выведи|список|мои|что\s+у\s+меня\s+по).*задач",
+           lambda E, l: _handle_list_tasks(E)),
+    Intent("list_rem", r"^(?:покажи|выведи|список|мои).*(?:напоминани|будильник)\b",
+           lambda E, l: _handle_list_rem(E)),
+    Intent("list_notes", r"^(?:покажи|выведи|список|мои).*заметк",
+           lambda E, l: _handle_list_notes(E)),
+    Intent("list_habits", r"^(?:покажи|выведи|список|мои).*привычк",
+           lambda E, l: _handle_list_habits(E)),
 
     # --- Поиск заметок ---
-    {"id": "search_notes", "pat": re.compile(r"^(?:найди|поищи)\s+(?:заметку\s+)?(.+)", re.I)},
+    Intent("search_notes", r"^(?:найди|поищи)\s+(?:заметку\s+)?(.+)",
+           lambda E, l: _handle_search_notes(E, l)),
 
     # --- Расписание ---
-    {"id": "schedule_day", "pat": re.compile(r"расписание\s+на\s+(понедельник|вторник|среда|четверг|пятница|суббота|воскресенье|сегодня|завтра)", re.I),
-     "neg": re.compile(_NEG, re.I)},
-    {"id": "schedule_show", "pat": re.compile(r"^(?:расписание|покажи\s+расписание|моё\s+расписание|мое\s+расписание)", re.I),
-     "neg": re.compile(_NEG, re.I)},
+    Intent("sched_day", r"расписание\s+на\s+(?:понедельник|вторник|среда|четверг|пятница|суббота|воскресенье|сегодня|завтра)",
+           lambda E, l: _handle_sched_day(E, l)),
+    Intent("sched_show", r"^(расписание|покажи\s+расписание|моё\s+расписание)\b",
+           lambda E, l: _handle_sched_show(E)),
 
-    # --- Удаление задачи/напоминания/заметки/привычки ---
-    {"id": "delete_item", "pat": re.compile(r"^(?:удали|убери|отмени)\s+(?:все\s+)?(?:задачу|задачи|напоминание|будильник|заметку|привычку)\s*:?\s*(.+)", re.I)},
-    {"id": "delete_done", "pat": re.compile(r"удали\s+(?:все\s+)?выполненн", re.I),
-     "neg": re.compile(_NEG, re.I)},
+    # --- Удаление ---
+    Intent("delete_task", r"^(?:удали|убери|отмени)\s+(?:задачу|задачи)\s*:?\s*(.+)",
+           lambda E, l: _handle_delete(E, "tasks", l)),
+    Intent("delete_rem", r"^(?:удали|убери|отмени)\s+(?:напоминание|будильник)\s*:?\s*(.+)",
+           lambda E, l: _handle_delete(E, "rem", l)),
+    Intent("delete_note", r"^(?:удали|убери|отмени)\s+(?:заметку)\s*:?\s*(.+)",
+           lambda E, l: _handle_delete(E, "notes", l)),
+    Intent("delete_done", r"удали\s+(?:все\s+)?выполненн",
+           lambda E, l: _handle_delete_done(E), neg=True),
 
     # --- Выполнение ---
-    {"id": "complete_item", "pat": re.compile(r"^(?:я\s+)?(?:выполнил[а]?|сделал[а]?|закончил[а]?|заверши[ла]?|готово|отметь(?:\s+выполненной)?)\s*(?:задачу|привычку)??:?\s*(.+)", re.I)},
+    Intent("complete", r"^(?:я\s+)?(?:выполнил[а]?|сделал[а]?|закончил[а]?|завершил[а]?|готово|отметь\s+выполненной)\s*:?\s*(.+)",
+           lambda E, l: _handle_complete(E, l)),
 
     # --- Звук ---
-    {"id": "sound_create", "pat": re.compile(r"звук|мелоди|рингтон|сигнал|звонок"),
-     "neg": re.compile(_NEG, re.I)},
-    {"id": "sound_set", "pat": re.compile(r"постав|установ|назнач|смени|поменя|использу"),
-     "neg": re.compile(_NEG, re.I)},
+    Intent("sound_create", r"(?:звук|мелоди|рингтон|сигнал|звонок).*(?:создай|сделай|напиши|сгенерир)\b",
+           lambda E, l: _handle_sound_create(E, l)),
+    Intent("sound_set", r"(?:постав|установ|назнач|смени|поменя|использу).*(?:звук|мелоди|колокол|сигнал)",
+           lambda E, l: _handle_sound_set(E, l)),
+    Intent("sound_check", r"(?:какой\s+звук|что\s+за\s+звук|какая\s+мелоди)",
+           lambda E, l: _handle_sound_check(E)),
 
     # --- Игры ---
-    {"id": "game", "pat": re.compile(r"\bигр|game|поигра|сыграем|змейк|понг|арканоид|flappy|флапп|тетрис|tetris|2048"),
-     "neg": re.compile(_NEG, re.I)},
-    {"id": "game_dino", "pat": re.compile(r"динозавр|dino", re.I),
-     "neg": re.compile(_NEG, re.I)},
+    Intent("game", r"(?:игру\s+)?(?:змейк|змейка|пинг|понг|арканоид|тетрис|tetris|flappy|флапп|2048)\b",
+           lambda E, l: _handle_game(E, l)),
+    Intent("game_dino", r"(?:игру\s+)?(?:динозавр|dino)\b",
+           lambda E, l: "🦖 Динозаврик в левом нижнем углу (Canvas). Клик или пробел — прыжок."),
 
     # --- Дизайн ---
-    {"id": "design", "pat": re.compile(r"(?:сделай|создай|перерисуй|обнови).*дизайн|киберпанк|уют|minimalist|минимал|неон|океан|закат|лес|сакура|золото|матрица|космос|ретро|акцент\s+\w+|круглее|звёзды|сетк", re.I),
-     "neg": re.compile(_NEG, re.I)},
+    Intent("design", r"(?:сделай|создай|перерисуй|обнови)\s+(?:дизайн|интерфейс|скин|оформление)|киберпанк|уют|minimalist|минимал|неон|океан|закат|лес|сакура|золото|матрица|космос|ретро|акцент\s+\w+|круглее|звёзды\s+на\s+фоне|сетк",
+           lambda E, l: "🎨 Перерисовка через подключённый ИИ (Настройки). Без ИИ: могу применить стили «"+", ".join(["киберпанк","уют","минимализм","неон","океан","закат","лес","сакура","золото","матрица","космос","ретро"])+"»."),
 
-    # --- Напоминание/будильник ---
-    {"id": "set_reminder", "pat": re.compile(r"напомни|будильн|разбуди|таймер"),
-     "neg": re.compile(_NEG, re.I)},
+    # --- Напоминание ---
+    Intent("set_reminder", r"напомни|будильн|разбуди|таймер",
+           lambda E, l: _handle_set_reminder(E, l)),
 
-    # --- Запомнить ---
-    {"id": "mem_store", "pat": re.compile(r"^запомни:\s*(.+?)\s*(?:=|—| - | это )\s*(.+)", re.I)},
-    {"id": "mem_store_val", "pat": re.compile(r"^запомни:?\s*(.+)$", re.I)},
-
-    # --- Забыть ---
-    {"id": "mem_forget", "pat": re.compile(r"^забудь\s+(?:что\s+)?(.+)", re.I)},
-
-    # --- Показать память ---
-    {"id": "mem_show", "pat": re.compile(r"^(?:что\s+ты\s+помнишь|что\s+я\s+просил\s+запомнить|мои\s+факты|что\s+ты\s+знаешь\s+обо\s+мне|память)", re.I)},
+    # --- Память ---
+    Intent("mem_store", r"^запомни:\s*(.+?)\s*(?:=|—| - | это )\s*(.+)",
+           lambda E, l: _handle_mem_store(E, l)),
+    Intent("mem_store_val", r"^запомни:\s*(.+)",
+           lambda E, l: _handle_mem_store_val(E, l)),
+    Intent("mem_forget", r"^забудь\s+(?:что\s+)?(.+)",
+           lambda E, l: _handle_mem_forget(E, l)),
+    Intent("mem_show", r"^(?:что\s+ты\s+помнишь|что\s+я\s+просил\s+запомнить|мои\s+факты|что\s+ты\s+знаешь\s+обо\s+мне|память|что\s+ты\s+знаешь)\b",
+           lambda E, l: _handle_mem_show(E)),
 
     # --- План ---
-    {"id": "plan_day", "pat": re.compile(r"^(?:план(?:\s+на\s+день)?|план\s+сегодня|составь\s+план|мой\s+план)", re.I),
-     "neg": re.compile(_NEG, re.I)},
-    {"id": "plan_week", "pat": re.compile(r"план\s+недел|на\s+недел|расписание\s+на\s+недел", re.I),
-     "neg": re.compile(_NEG, re.I)},
-    {"id": "plan_priority", "pat": re.compile(r"приоритиз|расставь\s+приоритет|что\s+важнее|с\s+чего\s+начать", re.I),
-     "neg": re.compile(_NEG, re.I)},
-    {"id": "plan_stats", "pat": re.compile(r"итоги|итог\s+дня|статистик|как\s+я\s+справ", re.I),
-     "neg": re.compile(_NEG, re.I)},
+    Intent("plan_day", r"^(?:план(?:\s+на\s+день)?|план\s+сегодня|составь\s+план|мой\s+план)\b",
+           lambda E, l: E.get("day_plan", lambda: "Пока пусто. Добавь задачи или напоминания.")),
+    Intent("plan_week", r"план\s+недел|на\s+недел|расписание\s+на\s+недел",
+           lambda E, l: _handle_plan_week(E)),
+    Intent("plan_priority", r"приоритиз|расставь\s+приоритет|что\s+важнее|с\s+чего\s+начать",
+           lambda E, l: _handle_plan_priority(E)),
+    Intent("plan_stats", r"итоги|статистик|как\s+я\s+справ",
+           lambda E, l: _handle_plan_stats(E)),
 
     # --- Имя ---
-    {"id": "set_name", "pat": re.compile(r"меня\s+зовут\s+(\w+)", re.I)},
-    {"id": "ask_name", "pat": re.compile(r"как\s+меня\s+зовут|кто\s+я", re.I), "neg": re.compile(_NEG, re.I)},
+    Intent("set_name", r"меня\s+зовут\s+(\w+)",
+           lambda E, l: _handle_set_name(E, l)),
+    Intent("ask_name", r"как\s+меня\s+зовут|кто\s+я",
+           lambda E, l: "Тебя зовут "+(E["D"].get("mem",{}).get("name","") or "Не помню. Напиши «меня зовут …».")),
 
     # --- Время/дата ---
-    {"id": "time", "pat": re.compile(r"который\s+час|сколько\s+времени", re.I)},
-    {"id": "date", "pat": re.compile(r"какое\s+сегодня\s+число|какая\s+сегодня\s+дата|какой\s+сегодня\s+день|какой\s+день\s+недели", re.I)},
+    Intent("time", r"который\s+час|сколько\s+времени",
+           lambda E, l: f"🕐 Сейчас {dt.datetime.now():%H:%M}"),
+    Intent("date", r"какое\s+сегодня\s+число|какая\s+сегодня\s+дата|какой\s+сегодня\s+день",
+           lambda E, l: f"📅 Сегодня {dt.datetime.now().day} {MONTHS_RU[dt.datetime.now().month-1]} {dt.datetime.now().year}, {['понедельник','вторник','среда','четверг','пятница','суббота','воскресенье'][dt.datetime.now().weekday()]}"),
 
-    # --- Помодоро/советы ---
-    {"id": "tip", "pat": re.compile(r"помодоро|эйзенхауэр|матриц|gtd|smart|2\s+минут|лягушк|прокраст|сон|выспат|фокус|концентр|привычк|стресс|тревог", re.I),
-     "neg": re.compile(_NEG, re.I)},
+    # --- Советы ---
+    Intent("tip", r"помодоро|эйзенхауэр|gtd|smart.*правило|лягушк|прокраст.*совет|сон.*совет|фокус.*совет|привычк.*совет|стресс.*совет",
+           lambda E, l: _handle_tips(E, l)),
 
     # --- Промпт ---
-    {"id": "make_prompt", "pat": re.compile(r"(?:напиши|сделай|создай|дай)\s+(?:мне\s+)?пр(о|м)пт(?:мпт)?", re.I),
-     "neg": re.compile(_NEG, re.I)},
+    Intent("make_prompt", r"(?:напиши|сделай|создай|дай)\s+(?:мне\s+)?пр(о|м)пт(?:мпт)?\s*(?:для|на|про|на\s+пиш.+для)\s*(.+)",
+           lambda E, l: _handle_make_prompt(E, l)),
 
     # --- Перевод/объяснение ---
-    {"id": "explain", "pat": re.compile(r"(?:объясни|что\s+такое|учёб|учеб|урок|изуч)", re.I),
-     "neg": re.compile(_NEG, re.I)},
-
-    # --- ИИ запрос (неBrain) ---
-    {"id": "llm", "pat": re.compile(r".+", re.I)},  # catch-all — только в конце!
+    Intent("explain", r"(?:объясни|что\s+такое)\s+(.+)",
+           lambda E, l: "Для объяснений подключите ИИ в «Настройках». Без ИИ я умею встроенные советы — напиши «помощь»."),
 ]
 
 # ============================================================
 # ГЛАВНЫЙ МОЗГ
 # ============================================================
-_MAX_DEPTH = 10
-
 def think(m, E, _depth=0):
-    """Парсит намерение → вызывает действие → верифицирует."""
+    """Парсит намерение → выполняет → возвращает ответ."""
     if m is None: return "Не понял команду."
-    if _depth > _MAX_DEPTH:
-        return "Слишком глубокая вложенность. Напишите проще."
+    if _depth > 10: return "Напишите проще."
 
     D = E["D"]; now = dt.datetime.now()
-    uid, save, refresh = E["uid"], E["save"], E["refresh_all"]
+    uid = E["uid"]; save = E["save"]; refresh = E["refresh_all"]
     mem = D.setdefault("mem", {}); mem.setdefault("facts", {}); mem.setdefault("name", "")
     tasks = D.get("tasks", [])
     sched = D.get("sched", [])
     rem = D.get("rem", [])
     notes = D.get("notes", [])
     habits = D.get("habits", [])
+    sounds = D.get("sounds", [])
+
+    # Контекст: pending-операции
+    pending = _CONTEXT.pending
 
     l = m.lower().strip().rstrip("!?. ")
 
-    # --- Поиск намерения ---
-    intent = None; intent_data = None; params = {}
-    for it in INTENTS:
-        if it.get("neg") and it["neg"].search(l):
-            continue
-        m_match = it["pat"].search(l) if it["pat"].search else it["pat"].match(l)
-        if m_match:
-            intent = it["id"]; intent_data = it
-            if m_match.groups():
-                params = {"raw": m_match.group(0), "groups": list(m_match.groups())}
-            break
+    # 1. Сначала проверяем контекстные команды (да/нет/сделано)
+    ctx_result = _try_context(pending, l, D, E, uid, save, refresh, now, tasks, notes, habits)
+    if ctx_result is not None: return ctx_result
 
-    # --- Выполнение по намерению ---
-    if intent == "help": return intent_data["reply"]
-    if intent == "greet":
-        n = len([t for t in tasks if not t.get("done")])
-        nx = sorted([r_.get("when", "") for r_ in rem if r_.get("on")])
-        nm = (", " + mem["name"]) if mem.get("name") else ""
-        return f"Привет{nm}! 👋 Открытых задач: {n}." + (f" Ближайшее напоминание: {nx[0]}." if nx else "") + " Напиши «план», чтобы собрать день."
-    if intent == "thanks": return intent_data["reply"]
-    if intent == "whoami": return intent_data["reply"]
+    # 2. Ищем намерение
+    best = None; best_match = None; best_pos = 999
+    for intent in INTENTS:
+        if intent.neg and is_negative(l): continue
+        mm = intent.pattern.search(l)
+        if mm and mm.start() < best_pos:
+            best = intent; best_match = mm; best_pos = mm.start()
 
-    # --- Вычисление ---
-    if intent == "calc":
-        expr = l.replace("посчитай", "").replace("сколько будет", "").replace("calc", "").replace("=", "").strip()
-        if not re.search(r"[\d]", expr):
-            return "Что посчитать?"
-        result = calc(expr)
-        return "🧮 = " + num(result) if result is not None else "Не смог посчитать."
+    # 3. Выполняем
+    if best:
+        return best.handler(E, l, D, now, uid, save, refresh, tasks, sched, rem, notes, habits, sounds)
 
-    # --- Случайное ---
-    if intent == "random":
-        if re.search(r"монетк", l): return "🪙 " + random.choice(["Орёл", "Решка"])
-        if re.search(r"кубик", l): return "🎲 " + str(random.randint(1, 6))
-        m_sel = re.match(r"выбери\s+(.+)", l)
-        if m_sel and re.search(r"\sили\s|,", m_sel[1]):
-            return "🎯 Выбираю: " + random.choice([x.strip() for x in re.split(r"\sили\s|,", m_sel[1]) if x.strip()])
+    # 4. Если ничего не нашли — fallback
+    return _fallback(l, D, E)
 
-    # --- Мотивация ---
-    if intent == "motivation": return "💬 " + random.choice(QUOTES)
+def _try_context(pending, l, D, E, uid, save, refresh, now, tasks, notes, habits):
+    """Пытается выполнить pending-операцию из контекста."""
+    if not pending: return None
 
-    # --- Имя ---
-    if intent == "set_name":
-        mem["name"] = params["groups"][0].capitalize()
-        save(); E["mem_add"]("Пользователя зовут " + mem["name"], "Обо мне") if E.get("mem_add") else None
-        return f"Приятно познакомиться, {mem['name']}! 🙂"
-    if intent == "ask_name":
-        return f"Тебя зовут {mem['name']}." if mem.get("name") else "Ты не говорил. Напиши «меня зовут …»."
-
-    # --- Время/дата ---
-    if intent == "time": return f"🕐 Сейчас {now:%H:%M}"
-    if intent == "date":
-        return f"📅 Сегодня {now.day} {MONTHS_RU[now.month-1]} {now.year}, {['понедельник','вторник','среда','четверг','пятница','суббота','воскресенье'][now.weekday()]}"
-
-    # --- Память ---
-    if intent == "mem_store":
-        E["mem_add"](f"{params['groups'][0].strip()}: {params['groups'][1].strip()}", "Факты", pin=True) if E.get("mem_add") else D.setdefault("memory", []).append({"id": uid(), "t": f"{params['groups'][0].strip()}: {params['groups'][1].strip()}", "cat": "Факты", "ts": now.strftime("%Y-%m-%d %H:%M"), "pin": True})
-        save(); return f"🧠 Запомнил: {params['groups'][0].strip()} → {params['groups'][1].strip()}"
-    if intent == "mem_store_val":
-        text = params["groups"][0].strip()
-        return E["mem_add_msg"](text) if E.get("mem_add_msg") else f"🧠 Запомнил: {text}"
-    if intent == "mem_forget":
-        q = params["groups"][0].strip().lower()
-        M = D.setdefault("memory", [])
-        gone = [x for x in M if q in x.get("t", "").lower()]
-        for x in gone: M.remove(x)
-        save(); return f"🗑 Забыл: {len(gone)} записей про «{q}»." if gone else f"Про «{q}» у меня ничего нет."
-    if intent == "mem_show":
-        M = D.get("memory", [])
-        if not M: return "Пока ничего не знаю."
-        cats = ["Обо мне", "Предпочтения", "Проекты", "Люди", "Факты", "Прочее"]
-        out = ["🧠 Что я знаю:"]
-        for c in cats:
-            xs = [x for x in M if x.get("cat") == c]
-            if xs: out += [c + ":"] + ["  • " + x["t"] for x in xs[:8]]
-        return "\n".join(out)
-
-    # --- Списки ---
-    if intent == "list_tasks":
-        ts = sorted([t for t in tasks if not t.get("done")],
-                     key=lambda t: ({"Высокий": 0, "Средний": 1, "Низкий": 2}.get(t.get("prio", "Средний"), 1), t.get("due") or "9"))
-        if not ts: return "Открытых задач нет 🎉"
-        return "✅ Открытые задачи:\n" + "\n".join(f"  {i}. [{t.get('prio','Ср')[0]}] {t.get('text','')}" + (f" (до {t['due']})" if t.get("due") else "") for i, t in enumerate(ts, 1))
-    if intent == "list_rem":
-        rs = sorted([x for x in rem if x.get("on")], key=lambda x: x.get("when", ""))
-        return "⏰ Активные:\n" + "\n".join(f"  {x.get('when','')} — {x.get('text','')} ({x.get('rep','')})" for x in rs) if rs else "Активных напоминаний нет."
-    if intent == "list_notes":
-        return "📝 Заметки:\n" + "\n".join("  • " + n.get("title", "") for n in notes[-15:]) if notes else "Заметок пока нет."
-    if intent == "list_habits":
-        td = now.date().isoformat()
-        return "🔁 Привычки:\n" + "\n".join(f"  {'✅' if td in h.get('log', []) else '⬜'} {h.get('text','')} (серия {len(h.get('log', []))})" for h in habits) if habits else "Привычек пока нет."
-
-    # --- Поиск заметок ---
-    if intent == "search_notes":
-        q = params["groups"][0][:6].lower()
-        hits = [n for n in notes if q in (n.get("title", "") + n.get("body", "")).lower()]
-        return "🔎 Нашёл:\n" + "\n".join(f"  • {n.get('title','')}: {n.get('body','')[:80]}" for n in hits[:8]) if hits else "Ничего не нашёл."
-
-    # --- Расписание ---
-    if intent == "schedule_day":
-        day_name = params["groups"][0].lower()
-        if day_name == "сегодня": di = now.weekday()
-        elif day_name == "завтра": di = (now.weekday() + 1) % 7
-        else: di = WDN_FULL.get(day_name, now.weekday())
-        it = sorted([x for x in sched if x.get("day", "").lower().startswith(DAYS[di][:3])], key=lambda x: x.get("time", ""))
-        return f"📆 {DAYS[di]}:\n" + "\n".join(f"  {x.get('time','')} — {x.get('text','')}" for x in it) if it else f"На {DAYS[di]} ничего не запланировано."
-    if intent == "schedule_show":
-        rows = sorted(sched, key=lambda x: (DAYS.index(x.get("day", "")) if x.get("day", "") in DAYS else 9, x.get("time", "")))
-        return "📆 Расписание:\n" + "\n".join(f"  {x.get('day','')} {x.get('time','')} — {x.get('text','')}" for x in rows) if rows else "Расписание пусто."
-
-    # --- Удаление ---
-    if intent == "delete_item":
-        txt = params["groups"][1].strip() if len(params["groups"]) > 1 else params["groups"][0].strip()
-        kind = params["groups"][0].strip().lower()
-        # Определяем тип по первому слову
-        _map = {"з": ("tasks", "text"), "н": ("rem", "text"), "б": ("rem", "text"), "ем": ("notes", "title"), "п": ("habits", "text")}
-        key_name, find_key = _map.get(kind[0], ("tasks", "text"))
-        src = D.get(key_name, [])
-        it = find(src, txt, find_key)
-        if it:
-            src.remove(it); save(); refresh()
-            return f"🗑 Удалил: {it.get(find_key, '')}"
-        return "Не нашёл."
-    if intent == "delete_done":
-        n = len([t for t in tasks if t.get("done")])
-        D["tasks"][:] = [t for t in tasks if not t.get("done")]
-        save(); refresh(); return f"🗑 Убрал выполненных: {n}"
-
-    # --- Выполнение ---
-    if intent == "complete_item":
-        txt = params["groups"][0].strip() if params["groups"] else l
-        # Сначала ищем привычки
-        h = find(habits, txt) if "привыч" in l else None
-        if not h: h = find([t for t in tasks if not t.get("done")], txt)
-        if h:
-            td = now.date().isoformat()
-            if td not in h.get("log", []): h["log"].append(td)
+    # "да/добавь/добавь в задачи" → принять
+    if re.match(r"^(?:да|давай|добавь\s+(?:в\s+)?задачи?|добавить|ок|хорошо)\b", l):
+        if pending["kind"] == "rem":
+            w, rest, rep = parse_when("через 10 минут", now)
+            if w:
+                E["add_rem"](pending["text"], w, pending["kind"], rep) if E.get("add_rem") else rem.append({"id":uid(),"text":pending["text"],"when":w.strftime("%Y-%m-%d %H:%M"),"kind":pending["kind"],"rep":rep,"on":True})
+                save(); refresh()
+                _CONTEXT.clear_pending()
+                _CONTEXT.record_action("set_reminder", pending["text"])
+                return f"✅ Поставил: «{pending['text']}» на {w:%d.%m %H:%M}"
+        elif pending["kind"] == "tasks":
+            for t in pending.get("items", []):
+                tasks.append({"id":uid(),"text":t,"prio":"Средний","due":"","done":False})
             save(); refresh()
-            return f"🔥 Отмечено: {h.get('text','')} (серия {len(h.get('log', []))})" if "привыч" in l else f"✅ Выполнено: {h.get('text','')}. Так держать!"
-        return "Не нашёл такое."
+            _CONTEXT.clear_pending()
+            _CONTEXT.record_action("add_tasks", str(len(pending["items"]))+" задач")
+            return f"✅ Добавил {len(pending['items'])} задач"
+        elif pending["kind"] == "save":
+            if l.startswith("задач"): tasks.append({"id":uid(),"text":pending["text"],"prio":"Средний","due":"","done":False})
+            else: notes.append({"id":uid(),"title":pending["text"][:40],"body":pending["text"]})
+            save(); refresh()
+            _CONTEXT.clear_pending()
+            _CONTEXT.record_action("save", pending["text"])
+            return "✅ Сохранил"
+        else:
+            _CONTEXT.clear_pending()
+            return "Хорошо, отменяю."
 
-    # --- Звук ---
-    if intent == "sound_create":
-        # Проверяем негативные контексты
-        if re.search(r"не\s+хочу\s+звук|без\s+звука|отмени\s+звук", l):
-            return "Хорошо, без звука."
-        # Ищем контекст
-        if re.search(r"постав|установ|назнач", l):
-            return _set_sound(l, D, E, uid, save, refresh, now)
-        d = re.sub(r"^(?:ок|пожалуйста|слушай|созда\w*|сдела\w*|придума\w*|сочини\w*|сгенерир\w*|мне)?\s*", "", l, flags=re.I).strip() or "приятный звук"
-        al = bool(re.search(r"будильн|разбуд|просып", l))
-        return f"🎵 Сочиняю звук: «{d}». " + ("Поставлю на ближайший будильник." if al else "Добавлю в библиотеку «Звуки».")
+    # "нет/не надо/отмена" → отменить
+    if re.match(r"^(?:нет|не\s+надо|не\s+нужно|отмена|отменяю|стоп|хватит)\b", l):
+        _CONTEXT.clear_pending()
+        _CONTEXT.record_action("cancel", "пользователь отменил")
+        return "Хорошо, отменяю."
 
-    if intent == "sound_set":
-        return _set_sound(l, D, E, uid, save, refresh, now)
+    return None
 
-    # --- Игры ---
-    if intent == "game_dino":
-        if re.search(r"убери|скрой|выключ", l): return "Убрал динозаврика. [[game: off]]"
-        return "🦖 Динозаврик в левом нижнем углу. Прыгать: клик по полю или пробел. [[game: on]]"
-    if intent == "game":
-        game_name = re.sub(r"создай|сделай|игру|напиши|поиграй|сыграем\s+", "", l, flags=re.I).strip() or "змейка"
-        return f"🎮 Сочиняю игру: «{game_name}». " + " [[game: {name}]]".format(name=game_name[:40])
+def _handle_greet(E):
+    D = E["D"]; tasks = D.get("tasks",[]); rem = D.get("rem",[]); mem = D.setdefault("mem",{})
+    n = len([t for t in tasks if not t.get("done")])
+    nx = sorted([r_.get("when","") for r_ in rem if r_.get("on")])
+    nm = (", "+mem.get("name","")) if mem.get("name") else ""
+    return f"Привет{nm}! 👋 Открытых задач: {n}."+(f" Ближайшее: {nx[0]}." if nx else "")+" Напиши «план» для дня."
 
-    # --- Дизайн ---
-    if intent == "design":
-        provider = D.get("cfg", {}).get("provider", "")
-        if provider and provider.startswith("Krug Brain"):
-            return "🎨 Перерисовка с подключённым ИИ в «Настройках». Без него могу стили: киберпанк, уют, минимализм, неон, океан, закат, лес, сакура, золото, матрица, космос, ретро, акцентные цвета, скругления, звёзды, сетка."
-        return f"🎨 Перерисовываю интерфейс… [[restyle: {l[:80]}]]"
+def _handle_calc(l):
+    expr = re.sub(r"^(?:посчитай|сколько\s+будет|посчитай\s+\d+\s*%\s*от|сколько\s+процент)\s*", "", l)
+    # Процент
+    m = re.match(r"(\d+(?:[.,]\d+)?)\s*%\s*от\s*(\d+(?:[.,]\d+)?)", l)
+    if m: return "🧮 = "+num(float(m[1].replace(",","."))*float(m[2].replace(",","."))/100)
+    if not re.search(r"\d", expr): return "Что посчитать?"
+    result = calc(expr)
+    return "🧮 = "+num(result) if result is not None else "Не смог посчитать."
 
-    # --- Напоминание ---
-    if intent == "set_reminder":
-        kind = "Будильник" if re.search(r"будильн|разбуди", l) else "Напоминание"
-        src = re.sub(r"таймер на", "через", m, flags=re.I)
-        w, rest, rep = parse_when(src, now)
-        txt = re.sub(r"^(?:\s|,|напомни(?:ть)?|мне|будильн\w*|разбуди|таймер|пожалуйста|что|чтобы|о\s+том|окей|ок|поставь|установи|заведи|будь\s+добр)+", "", rest, flags=re.I).strip()
-        txt = re.sub(r"\s+(?:до|к|на|в)$", "", txt) or ("Таймер" if "таймер" in l else kind)
-        if w:
-            E["add_rem"](txt, w, kind, rep) if E.get("add_rem") else rem.append({"id": uid(), "text": txt, "when": w.strftime("%Y-%m-%d %H:%M"), "kind": kind, "rep": rep, "on": True})
-            if E.get("save"): E["save"]()
-            if E.get("refresh_all"): E["refresh_all"]()
-            return f"✅ {kind}: «{txt}» — {w:%d.%m %H:%M}" + (f", {rep.lower()}" if rep != "Один раз" else "")
-        mem["pending"] = {"k": "rem", "text": txt, "kind": kind}
-        return f"На какое время поставить «{txt}»? (например: через 20 минут / завтра в 9:00)"
+def _handle_list_tasks(E):
+    tasks = E["D"].get("tasks",[])
+    ts = sorted([t for t in tasks if not t.get("done")], key=lambda t:({"Высокий":0,"Средний":1,"Низкий":2}.get(t.get("prio","Ср"),1),t.get("due") or "9"))
+    if not ts: return "Открытых задач нет 🎉"
+    return "✅ Задачи:\n"+"\n".join(f"  {i}. [{t.get('prio','Ср')[0]}] {t.get('text','')}"+" (до "+t["due"]+")" if t.get("due") else "" for i,t in enumerate(ts,1))
 
-    # --- План ---
-    if intent == "plan_day":
-        return E["day_plan"]() if E.get("day_plan") else "Пока пусто. Добавь задачи или напиши «напомни через 10 минут выпить воды»."
-    if intent == "plan_week":
-        return _week_view(D, now)
-    if intent == "plan_priority":
-        return _matrix(D, now)
-    if intent == "plan_stats":
-        done = len([t for t in tasks if t.get("done")])
-        op = len(tasks) - done
-        td = now.date().isoformat()
-        hb = len([h for h in habits if td in h.get("log", [])])
-        return f"📊 Выполнено задач: {done}, осталось: {op}. Привычек сегодня: {hb}/{len(habits)}." + (" Отличный прогресс!" if done > op else " Выбери одну главную задачу и начни с неё.")
+def _handle_list_rem(E):
+    rem = E["D"].get("rem",[])
+    rs = sorted([x for x in rem if x.get("on")], key=lambda x:x.get("when",""))
+    return "⏰ Активные:\n"+"\n".join(f"  {x.get('when','')} — {x.get('text','')} ({x.get('rep','')})" for x in rs) if rs else "Активных напоминаний нет."
 
-    # --- Советы ---
-    if intent == "tip":
-        KB = {
-            "помодоро": "🍅 Помодоро: 25 мин работы → 5 мин отдыха; после 4 циклов — перерыв 15–30 мин.",
-            "эйзенхауэр|матриц": "🧭 Срочно+Важно → делай сейчас. Важно, не срочно → планируй. Срочно, не важно → делегируй. Ни то ни другое → удаляй.",
-            "gtd": "📥 Собери всё → реши → следующее действие → делегируй/запланируй/сделай. Раз в неделю — обзор.",
-            "smart": "🎯 Конкретная, измеримая, достижимая, значимая, ограниченная по сроку.",
-            "2\s+минут": "⚡ Если дело < 2 минут — делай сразу.",
-            "лягушк": "🐸 Самое неприятное дело — первым с утра.",
-            "прокраст": "🐢 Первый шаг на 5 минут, разбей задачу, убери отвлекающее.",
-            "сон|выспат": "😴 7–9 часов, одно время подъёма, без экранов за 40 мин.",
-            "фокус|концентр": "🎧 Одна задача, уведомления выключены, блок 25–50 мин.",
-            "привычк": "🔁 Микро-версия (2 мин), привяжи к действию, не пропускай 2 дня.",
-            "стресс|тревог": "🌿 Выпиши → раздели → один шаг. Дыхание 4-6, прогулка, сон.",
-        }
-        for pat, tip in KB.items():
-            if re.search(pat, l, re.I): return tip
-        return None  # не найден конкретный совет
+def _handle_list_notes(E):
+    notes = E["D"].get("notes",[])
+    return "📝 Заметки:\n"+"\n".join("  • "+n.get("title","") for n in notes[-15:]) if notes else "Заметок пока нет."
 
-    # --- Промпт ---
-    if intent == "make_prompt":
-        topic = l.replace("напиши", "").replace("сделай", "").replace("создай", "").replace("дай", "").replace("пр(о|м)пт", "").strip()
-        if not topic: return "О чём написать промпт?"
-        PT = {
-            "код|програм|python|скрипт|сайт|бот": ("senior-разработчик", "Код в блоках, пояснение, граничные случаи"),
-            "картин|изображ|рисун|логотип": ("арт-директор", "Сюжет, стиль, свет, камера, палитра, --ar 16:9"),
-            "текст|статья|пост|реклам|письм": ("копирайтер", "3 варианта: заголовок + текст + призыв"),
-            "объясни|учёб|урок|изуч": ("репетитор", "Простое объяснение, пример, 3 проверочных вопроса"),
-        }
-        for pat, (role, fmt) in PT.items():
-            if re.search(pat, topic, re.I):
-                return f"## Роль\nТы — {role}.\n\n## Задача\n{topic[0].upper() + topic[1:]}.\n\n## Формат\n{fmt}"
-        return f"## Роль\nТы — эксперт в теме.\n\n## Задача\n{topic[0].upper() + topic[1:]}.\n\n## Формат\nСтруктурированный ответ, шаги, примеры."
+def _handle_list_habits(E):
+    habits = E["D"].get("habits",[]); now = dt.datetime.now(); td = now.date().isoformat()
+    return "🔁 Привычки:\n"+"\n".join(f"  {'✅' if td in h.get('log',[]) else '⬜'} {h.get('text','')} (серия {len(h.get('log',[]))})" for h in habits) if habits else "Привычек пока нет."
 
-    # --- Explain ---
-    if intent == "explain":
-        return "Для объяснений и учебных материалов подключите ИИ в «Настройках». Без ИИ я могу только встроенные советы: напиши «помощь»."
+def _handle_search_notes(E, l):
+    notes = E["D"].get("notes",[]); m = re.match(r"^(?:найди|поищи)\s+(?:заметку\s+)?(.+)", l)
+    q = (m.groups()[0] if m else l)[:6].lower()
+    hits = [n for n in notes if q in (n.get("title","")+n.get("body","")).lower()]
+    return "🔎 Нашёл:\n"+"\n".join(f"  • {n.get('title','')}: {n.get('body','')[:80]}" for n in hits[:8]) if hits else "Ничего не нашёл."
 
-    # --- LLM fallback ---
-    return None  # передаём на обработку внешнему ИИ
+def _handle_sched_day(E, l):
+    sched = E["D"].get("sched",[]); now = dt.datetime.now()
+    m = re.match(r".*(понедельник|вторник|среда|четверг|пятница|суббота|воскресенье|сегодня|завтра)", l, re.I)
+    day_name = m.group(1).lower() if m else "сегодня"
+    if day_name == "сегодня": di = now.weekday()
+    elif day_name == "завтра": di = (now.weekday()+1)%7
+    else: di = WDN.index(day_name[:3].lower()) if day_name[:3].lower() in WDN else now.weekday()
+    it = sorted([x for x in sched if x.get("day","")==DAYS[di]], key=lambda x:x.get("time",""))
+    return f"📆 {DAYS[di]}:\n"+("\n".join(f"  {x.get('time','')} — {x.get('text','')}" for x in it) if it else f"На {DAYS[di]} ничего не запланировано.")
 
-# ============================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ============================================================
-def _week_view(D, now):
-    L = ["🗓 Неделя:"]
-    mon = now.date() - dt.timedelta(days=now.weekday())
-    sched = D.get("sched", []); tasks = D.get("tasks", []); rem = D.get("rem", [])
-    for i, d in enumerate(DAYS):
-        day = mon + dt.timedelta(days=i); mark = " ← сегодня" if day == now.date() else ""
-        it = [f"{x.get('time','')} {x.get('text','')}" for x in sorted(sched, key=lambda x: x.get("time","")) if x.get("day") == d]
-        it += [f"до: {t.get('text','')}" for t in tasks if not t.get("done") and t.get("due") == day.isoformat()]
-        it += [f"{r.get('when','')[11:]} {r.get('text','')}" for r in rem if r.get("on") and len(r.get("when","")) > 11 and r["when"].startswith(day.isoformat())]
-        L.append(f"  {d} {day:%d.%m}{mark}: " + ("; ".join(it) if it else "—"))
+def _handle_sched_show(E):
+    sched = E["D"].get("sched",[])
+    rows = sorted(sched, key=lambda x:(DAYS.index(x.get("day","")) if x.get("day","") in DAYS else 9, x.get("time","")))
+    return "📆 Расписание:\n"+("\n".join(f"  {x.get('day','')} {x.get('time','')} — {x.get('text','')}" for x in rows) if rows else "Расписание пусто.")
+
+def _handle_delete(E, kind, l):
+    D = E["D"]; tasks = D.get("tasks",[]) if kind == "tasks" else D.get(kind, [])
+    m = re.match(r"^(?:удали|убери|отмени)\s+(?:задачу|напоминание|заметку)\s*:?\s*(.+)", l, re.I)
+    txt = (m.group(1) if m else l).strip()
+    it = find(tasks, txt, "title" if kind == "notes" else "text")
+    if it:
+        tasks.remove(it); E["save"](); E["refresh_all"]()
+        return "🗑 Удалил: "+it.get("text",it.get("title",""))
+    return "Не нашёл."
+
+def _handle_delete_done(E):
+    tasks = E["D"].get("tasks",[]); n = len([t for t in tasks if t.get("done")])
+    E["D"]["tasks"][:] = [t for t in tasks if not t.get("done")]; E["save"](); E["refresh_all"]()
+    return f"🗑 Убрал выполненных: {n}"
+
+def _handle_complete(E, l):
+    D = E["D"]; tasks = D.get("tasks",[]); habits = D.get("habits",[]); now = dt.datetime.now(); td = now.date().isoformat()
+    m = re.match(r".*(?:задачу|привычку)??:?\s*(.+)", l, re.I)
+    txt = (m.group(1) if m else l).strip()
+    # Сначала привычки
+    h = find(habits, txt) if "привыч" in l else None
+    if not h: h = find([t for t in tasks if not t.get("done")], txt)
+    if h:
+        if "привыч" in l:
+            if td not in h.get("log",[]): h["log"].append(td)
+        else:
+            h["done"] = True
+        E["save"](); E["refresh_all"]()
+        return f"{'🔥' if 'привыч' in l else '✅'} {'Отмечено' if 'привыч' in l else 'Выполнено'}: {h.get('text','')}. Так держать!"
+    return "Не нашёл такое."
+
+def _handle_sound_create(E, l):
+    d = re.sub(r".*(?:создай|сделай|напиши|сгенерир)\s+", "", l).strip() or "приятный звук"
+    al = bool(re.search(r"будильн|разбуд|просып", l))
+    return f"🎵 Сочиняю: «{d}»." + (" Поставлю на будильник." if al else " Добавлю в библиотеку.")
+
+def _handle_sound_set(E, l):
+    sounds = E["D"].get("sounds",[]); rem = E["D"].get("rem",[])
+    pick = next((s for s in sounds if s.get("name","").lower() in l), None)
+    if not pick and sounds: pick = sounds[-1]
+    if not pick: return "Нет звуков. Сначала создай."
+    act = sorted([r for r in rem if r.get("on")], key=lambda x:x.get("when",""))
+    if re.search(r"будильн", l): act = [r for r in act if r.get("kind")=="Будильник"] or act
+    if not act: return "Нет активных напоминаний."
+    act[0]["sound"] = pick["id"]; E["save"](); E["refresh_all"]()
+    return f"🎵 Поставил «{pick['name']}» на «{act[0].get('text','')}»."
+
+def _handle_sound_check(E):
+    sounds = E["D"].get("sounds",[]); rem = E["D"].get("rem",[])
+    act = sorted([r for r in rem if r.get("on")], key=lambda x:x.get("when",""))
+    if not act: return "Нет активных напоминаний."
+    s0 = next((x for x in sounds if x["id"]==act[0].get("sound")), None)
+    return f"Звук: «{s0.get('name','')}»" if s0 else "Обычный."
+
+def _handle_game(E, l):
+    game = re.sub(r".*(?:игру\s+)?(?:змейк|змейка|пинг|понг|арканоид|тетрис|flappy|2048).*", "", l).strip() or "змейка"
+    return f"🎮 Игру «{game}» в левом нижнем углу (Canvas). Клик/пробел — играть."
+
+def _handle_set_reminder(E, l):
+    D = E["D"]; now = dt.datetime.now(); rem = D.get("rem",[])
+    kind = "Будильник" if re.search(r"будильн|разбуди", l) else "Напоминание"
+    src = re.sub(r"таймер на", "через", l, flags=re.I)
+    w, rest, rep = parse_when(src, now)
+    txt = re.sub(r".*(?:напомни|будильн|разбуди|таймер|пожалуйста|ок|поставь|установи).*","", rest, flags=re.I).strip()
+    txt = txt or ("Будильник" if kind=="Будильник" else kind)
+    if w:
+        E["add_rem"](txt, w, kind, rep) if E.get("add_rem") else rem.append({"id":E["uid"](),"text":txt,"when":w.strftime("%Y-%m-%d %H:%M"),"kind":kind,"rep":rep,"on":True})
+        E["save"](); E["refresh_all"]()
+        return f"✅ {kind}: «{txt}» — {w:%d.%m %H:%M}" + (f", {rep.lower()}" if rep != "Один раз" else "")
+    # Pending
+    _CONTEXT.store_pending("rem", txt, kind=kind)
+    return f"На какое время: «{txt}»? (через 20 минут / завтра в 9:00)"
+
+def _handle_mem_store(E, l):
+    m = re.match(r"^запомни:\s*(.+?)\s*(?:=|—| - | это )\s*(.+)", l, re.I)
+    if not m: return None
+    k, v = m.group(1).strip(), m.group(2).strip()
+    E["mem_add"](f"{k}: {v}", "Факты", pin=True) if E.get("mem_add") else None
+    E["save"]()
+    return f"🧠 Запомнил: {k} → {v}"
+
+def _handle_mem_store_val(E, l):
+    m = re.match(r"^запомни:\s*(.+)", l, re.I)
+    if not m: return None
+    text = m.group(1).strip()
+    if E.get("mem_add_msg"): return E["mem_add_msg"](text)
+    E["save"]()
+    return f"🧠 Запомнил: {text[:60]}"
+
+def _handle_mem_forget(E, l):
+    m = re.match(r"^забудь\s+(?:что\s+)?(.+)", l, re.I)
+    if not m: return None
+    q = m.group(1).strip().lower()
+    M = E["D"].setdefault("memory",[])
+    gone = [x for x in M if q in x.get("t","").lower()]
+    for x in gone: M.remove(x)
+    E["save"]()
+    return f"🗑 Забыл: {len(gone)} записей." if gone else f"Про «{q}» ничего нет."
+
+def _handle_mem_show(E):
+    M = E["D"].get("memory",[])
+    if not M: return "Пока ничего не знаю."
+    cats = ["Обо мне","Предпочтения","Проекты","Люди","Факты","Прочее"]
+    out = ["🧠 Что я знаю:"]
+    for c in cats:
+        xs = [x for x in M if x.get("cat")==c]
+        if xs: out += [c+":"] + ["  • "+x["t"] for x in xs[:6]]
+    return "\n".join(out)
+
+def _handle_plan_week(E):
+    D = E["D"]; now = dt.datetime.now(); sched = D.get("sched",[]); tasks = D.get("tasks",[]); rem = D.get("rem",[])
+    L = ["🗓 Неделя:"]; mon = now.date()-dt.timedelta(days=now.weekday())
+    for i,d in enumerate(DAYS):
+        day = mon+dt.timedelta(days=i); mark = " ← сегодня" if day==now.date() else ""
+        it = [f"{x.get('time','')} {x.get('text','')}" for x in sorted(sched, key=lambda x:x.get("time","")) if x.get("day")==d]
+        it += [f"до: {t.get('text','')}" for t in tasks if not t.get("done") and t.get("due")==day.isoformat()]
+        L.append(f"  {d} {day:%d.%m}{mark}: "+("; ".join(it) if it else "—"))
     return "\n".join(L)
 
-def _matrix(D, now):
-    near = (now + dt.timedelta(days=2)).strftime("%Y-%m-%d"); q = {k: [] for k in "abcd"}
-    for t in D.get("tasks", []):
+def _handle_plan_priority(E):
+    D = E["D"]; near = (dt.datetime.now()+dt.timedelta(days=2)).strftime("%Y-%m-%d"); tasks = D.get("tasks",[]); q = {k:[] for k in "abcd"}
+    for t in tasks:
         if t.get("done"): continue
-        urg = t.get("prio") == "Высокий" or (t.get("due") and t["due"] <= near)
+        urg = t.get("prio")=="Высокий" or (t.get("due") and t["due"]<=near)
         imp = t.get("prio") != "Низкий"
-        q["a" if urg and imp else "b" if imp else "c" if urg else "d"].append(t.get("text", ""))
-    nm = {"a": "🔥 Сделай сейчас (срочно+важно)", "b": "📅 Запланируй (важно)",
-          "c": "🤝 Делегируй / быстро (срочно)", "d": "🗑 Можно отложить или удалить"}
-    out = [f"{nm[k]}:\n" + "\n".join("  • " + x for x in v) for k, v in q.items() if v]
-    return "🧭 Приоритеты по матрице Эйзенхауэра:\n\n" + "\n\n".join(out) if out else "Открытых задач нет — отлично!"
+        q["a" if urg and imp else "b" if imp else "c" if urg else "d"].append(t.get("text",""))
+    nm = {"a":"🔥 Сделай сейчас","b":"📅 Запланируй","c":"🤝 Делегируй","d":"🗑 Удали"}
+    out = [f"{nm[k]}:\n"+"\n".join("  • "+x for x in v) for k,v in q.items() if v]
+    return "🧭 Приоритеты:\n\n"+"\n\n".join(out) if out else "Открытых задач нет."
 
-def _set_sound(l, D, E, uid, save, refresh, now):
-    ss = D.get("sounds", [])
-    pick = next((s for s in ss if s.get("name","").lower() in l), None)
-    if not pick and ss and re.search(r"последн|нов|этот|его|её|ее|созданн", l): pick = ss[-1]
-    if not pick:
-        w = [x for x in re.findall(r"\w{4,}", l) if not x.startswith(("звук", "будиль", "постав", "устан", "назна"))]
-        pick = next((s for s in ss if any(x[:5] in s.get("name","").lower() for x in w)), None) if w else None
-    if not pick:
-        return "Какой звук поставить? В библиотеке: " + (", ".join(s.get("name","") for s in ss[-8:]) or "пусто, скажи «создай нежный звук для будильника»") + "."
-    act = sorted([r_ for r_ in D.get("rem", []) if r_.get("on")], key=lambda r_: r_.get("when", ""))
-    if re.search(r"будильн", l): act = [r_ for r_ in act if r_.get("kind") == "Будильник"] or act
-    tm = re.search(r"(\d{1,2})[:.](\d{2})", l)
-    if tm and act: act = [r_ for r_ in act if r_.get("when","")[11:] == f"{int(tm[1]):02d}:{tm[2]}"] or act
-    if not act: return "Нет активных будильников."
-    act[0]["sound"] = pick["id"]; save(); refresh()
-    return f"🎵 Готово: на «{act[0].get('text','')}» ({act[0].get('when','')[11:]}) теперь играет «{pick['name']}»."
+def _handle_plan_stats(E):
+    D = E["D"]; tasks = D.get("tasks",[]); habits = D.get("habits",[]); now = dt.datetime.now(); td = now.date().isoformat()
+    done = len([t for t in tasks if t.get("done")]); op = len(tasks)-done
+    hb = len([h for h in habits if td in h.get("log",[])])
+    return f"📊 Задач выполнено: {done}/{len(tasks)}. Привычек сегодня: {hb}/{len(habits)}. "+("Отличный прогресс!" if done > op else " Выбери одну главную задачу.")
 
-# ============================================================
-# Fallback
-# ============================================================
-def fallback(m, E):
-    D = E["D"]; mem = D.setdefault("mem", {}); l = m.lower(); out = []
-    words = re.findall(r"\w{4,}", l)
-    hits = [n.get("title","") for n in D.get("notes", []) if any(w[:5] in ((n.get("title","") + n.get("body","")).lower()) for w in words)][:5]
-    if hits: out.append("🔎 В твоих заметках похожее: " + "; ".join(hits))
-    EX = ["напомни через 10 минут выпить воды", "будильник на 7:00", "задача: купить хлеб", "покажи задачи",
-          "составь план изучения английского на 8 недель", "план на день", "план недели",
-          "напиши промпт для рекламного текста", "заметка: идея", "привычка: зарядка", "приоритизируй задачи"]
+def _handle_set_name(E, l):
+    D = E["D"]; m = re.search(r"зовут\s+(\w+)", l, re.I)
+    if m:
+        name = m.group(1).capitalize(); D.setdefault("mem",{})["name"] = name
+        E["save"]()
+        if E.get("mem_add"): E["mem_add"]("Пользователя зовут "+name, "Обо мне")
+        return f"Приятно познакомиться, {name}! 🙂"
+    return "Как тебя зовут?"
+
+def _handle_tips(E, l):
+    tips = {
+        "помодоро": "🍅 Помодоро: 25 мин работы → 5 мин отдыха; 4 цикла → перерыв 15-30 мин. Таймер во вкладке «Фокус».",
+        "эйзенхауэр": "🧭 Срочно+Важно → делай. Важно → планируй. Срочно → делегируй. Ни то → удаляй.",
+        "gtd": "📥 Собери всё → реши → следующее действие → делегируй/запланируй/сделай. Раз в неделю — обзор.",
+        "smart": "🎯 Конкретная, измеримая, достижимая, значимая, с дедлайном.",
+        "лягушк": "🐸 Самое неприятное дело — первым с утра.",
+        "прокраст": "🐢 Первый шаг на 5 минут. Разбей задачу. Убери отвлекающее.",
+        "сон": "😴 7-9 часов, без экранов за 40 мин до сна, прохладная комната.",
+        "фокус": "🎧 Одна задача, уведомления выключены, блок 25-50 мин.",
+        "привычк": "🔁 Микро-версия (2 мин). Привяжи к действию. Не пропускай 2 дня.",
+        "стресс": "🌿 Выпиши тревоги → раздели на «могу»/«не могу» → шаг по первому.",
+    }
+    for k,tip in tips.items():
+        if k in l: return tip
+    return "Нет совета для этого запроса."
+
+def _handle_make_prompt(E, l):
+    m = re.search(r"пр(о|м)пт(?:мпт)?\s*(?:для|на|про|на\s+пиш.+для)\s*(.+)", l, re.I)
+    topic = (m.group(1) if m else l).strip()
+    if not topic: return "Для чего промпт?"
+    roles = {
+        "код|програм|python|скрипт|сайт|бот": ("senior-разработчик","Код в блоках, пояснение, граничные случаи"),
+        "картин|рисун|логотип|дизайн": ("арт-директор","Сюжет, стиль, свет, камера, палитра"),
+        "текст|статья|пост|реклам|письм": ("копирайтер","3 варианта: заголовок + текст + призыв"),
+        "объясни|учёб|урок": ("репетитор","Простое объяснение, пример, 3 вопроса"),
+    }
+    for pat,(role,fmt) in roles.items():
+        if re.search(pat, topic, re.I):
+            return f"## Роль\nТы — {role}.\n\n## Задача\n{topic[0].upper()+topic[1:]}\n\n## Формат\n{fmt}"
+    return f"## Роль\nТы — эксперт.\n\n## Задача\n{topic[0].upper()+topic[1:]}\n\n## Формат\nСтруктурированный ответ."
+
+def _fallback(l, D, E):
+    out = []
+    # Проверяем заметки на похожие темы
+    notes = D.get("notes",[]); words = re.findall(r"\w{4,}", l)
+    hits = [n.get("title","") for n in notes if any(w[:5] in (n.get("title","")+n.get("body","")).lower() for w in words)][:3]
+    if hits: out.append("🔎 В заметках: "+"; ".join(hits))
+    # Предлагаем похожие команды
+    EX = ["напомни через 10 минут выпить воды","будильник на 7:00","задача: купить хлеб","покажи задачи","план на день","составь план изучения английского","заметка: идея","привычка: зарядка","приоритизируй задачи","разбей задачу на шаги","что такое помодоро","мотивация"]
     try:
         c = difflib.get_close_matches(l, EX, 2, 0.4)
-    except Exception: c = []
-    if c: out.append("Возможно, ты имел в виду:\n" + "\n".join("• " + x for x in c))
-    mem["pending"] = {"k": "save", "text": m}; mem["last_unknown"] = m
+        if c: out.append("Возможно, ты имел в виду:\n"+"\n".join("• "+x for x in c))
+    except: pass
+    # Запоминаем что не поняли
+    _CONTEXT.store_pending("save", l)
     return "\n".join(out) if out else None
